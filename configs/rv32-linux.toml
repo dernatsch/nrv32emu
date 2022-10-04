@@ -1,0 +1,7 @@
+[vm]
+machine = "riscv32"
+memory = 128
+bios = "bbl32.bin"
+kernel = "kernel-riscv32.bin"
+cmdline = "console=hvc0 root=/dev/vda rw"
+drive0 = "root-riscv32.bin"
