@@ -1,5 +1,11 @@
 use bytes::{Buf, BufMut};
 
+macro_rules! sext {
+    ($val:expr, $topbit:expr) => {
+        (($val << (31 - $topbit)) >> (31 - $topbit))
+    };
+}
+
 #[derive(Clone, Debug)]
 enum VMMachineSpec {
     RV32,
@@ -71,36 +77,93 @@ impl RV32CPU {
         }
     }
 
-    fn write_u32(&mut self, addr: u32, val: u32) {
-        println!("writing {:#010x} at {:#010x}", val, addr);
-    }
-
     fn run(&mut self) {
         //TODO: check interrupts
         //TODO: TLB (this probably needs a caching system, reading from memory
         // would need to search the ranges and then the tlb to translate an addr)
 
         let insn = self.mem.read_ins(self.pc as usize);
-        println!("executing {:#010x}: {:#010x}", self.pc, insn);
 
         let opcode = insn & 0x7f;
+        let quadrant = insn & 3;
         let rd = (insn >> 7) & 0x1f;
         let rs1 = (insn >> 15) & 0x1f;
         let rs2 = (insn >> 20) & 0x1f;
 
+        let insn_str = if quadrant == 3 {
+            format!("{:#010x}", insn)
+        } else {
+            format!("{:#06x}", insn & 0xffff)
+        };
+
+        println!(
+            "pc={:#010x} insn={:10} q={} op={:02x}",
+            self.pc, insn_str, quadrant, opcode
+        );
+
         match insn & 3 {
             0b00 => {
-                unimplemented!("compact quadrant 0");
+                let funct3 = (insn >> 13) & 7;
+                let rd = ((insn >> 2) & 7) | 8;
+
+                match funct3 {
+                    0 => {
+                        // c.addi4spn
+                        let imm = ((insn >> 7) & 0x30)
+                            | ((insn >> 1) & 0x3c0)
+                            | ((insn >> 4) & 0x04)
+                            | ((insn >> 2) & 0x08);
+                        if imm == 0 {
+                            panic!("illegal instruction");
+                        }
+                        self.regs[rd as usize] = self.regs[2] + imm;
+                        self.pc += 2;
+                    }
+                    _ => unimplemented!("compact0 function {}", funct3),
+                }
             }
             0b01 => {
                 let funct3 = (insn >> 13) & 7;
 
                 match funct3 {
                     0 => {
+                        // c.addi
                         if rd != 0 {
                             let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
                             self.regs[rd as usize] += imm;
                             self.pc += 2;
+                        }
+                    }
+                    1 => {
+                        // c.jal
+                        let imm = ((insn >> 1) & 0xb40)
+                            | ((insn >> 7) & 0x10)
+                            | ((insn << 2) & 0x400)
+                            | ((insn << 1) & 0x80)
+                            | ((insn >> 2) & 0x04)
+                            | ((insn << 3) & 0x20);
+
+                        self.regs[1] = self.pc + 2;
+                        self.pc += imm;
+                    }
+                    3 => {
+                        if rd == 2 {
+                            // c.addi16sp
+                            let imm = ((insn >> 3) & 0x200)
+                                | ((insn >> 2) & 0x10)
+                                | ((insn << 1) & 0x40)
+                                | ((insn << 4) & 0x100)
+                                | ((insn << 3) & 0x20);
+
+                            if imm == 0 {
+                                panic!("illegal instruction");
+                            }
+
+                            self.regs[2] += imm;
+                            self.pc += 2;
+                        } else {
+                            // c.lui
+                            todo!("c.lui");
                         }
                     }
                     _ => unimplemented!("compact1 function {}", funct3),
@@ -114,12 +177,14 @@ impl RV32CPU {
                     4 => {
                         if ((insn >> 12) & 1) == 0 {
                             if rs2 == 0 {
+                                // c.jr
                                 if rd == 0 {
                                     panic!("illegal instruction");
                                 }
 
                                 self.pc = self.regs[rd as usize] & !1;
                             } else {
+                                // c.mv
                                 if rd != 0 {
                                     self.regs[rd as usize] = self.regs[rs2 as usize];
                                 }
@@ -132,10 +197,9 @@ impl RV32CPU {
                     }
                     6 => {
                         // c.swsp
-                        let imm = ((insn >> 5) & 0x3c) |
-                            ((insn >> 1) & 0xc0);
+                        let imm = ((insn >> 5) & 0x3c) | ((insn >> 1) & 0xc0);
                         let addr = self.regs[2] + imm;
-                        self.write_u32(addr, self.regs[rs2 as usize]);
+                        self.mem.write_u32(addr, self.regs[rs2 as usize]);
 
                         self.pc += 2;
                     }
@@ -159,11 +223,12 @@ impl RV32CPU {
                         let val;
 
                         match funct3 {
-                            // addi
                             0 => {
+                                // addi
                                 val = self.regs[rs1 as usize] + imm;
                             }
                             1 => {
+                                // slli
                                 val = self.regs[rs1 as usize] << imm;
                             }
                             _ => {
@@ -191,6 +256,7 @@ impl RV32CPU {
 
                         match funct3 & 3 {
                             1 => {
+                                // csrrw
                                 let val2 = self.read_csr(imm);
                                 self.write_csr(imm, val);
 
@@ -198,7 +264,8 @@ impl RV32CPU {
                                     self.regs[rd as usize] = val2;
                                 }
                             }
-                            2 => {
+                            2|3 => {
+                                // csrrs, csrrc
                                 let val2 = self.read_csr(imm);
                                 if rs1 != 0 {
                                     val = val2 | val;
@@ -217,6 +284,7 @@ impl RV32CPU {
                         self.pc += 4;
                     }
                     0x67 => {
+                        // jalr
                         let imm = insn >> 20;
                         let val = self.pc + 4;
                         self.pc = self.regs[rs1 as usize] + imm;
@@ -226,15 +294,20 @@ impl RV32CPU {
                         }
                     }
                     0x6f => {
-                        let imm = ((insn >> (31 - 20)) & (1 << 20))
-                            | ((insn >> (21 - 1)) & 0x7fe)
-                            | ((insn >> (20 - 11)) & (1 << 11))
-                            | (insn & 0xff000);
+                        // jal
+                        let imm = ((insn >> 11) & 0x100000)
+                            | ((insn >> 20) & 0x7fe)
+                            | ((insn >> 9) & 0x800)
+                            | (insn) & 0xff000;
+
+                        let imm = sext!(imm as i32, 20);
 
                         if rd != 0 {
                             self.regs[rd as usize] = self.pc + 4;
                         }
-                        self.pc += imm;
+
+                        let (target, _) = u32::overflowing_add(self.pc, imm as u32);
+                        self.pc = target;
                     }
                     0x63 => {
                         // branching
@@ -261,7 +334,9 @@ impl RV32CPU {
                                 | ((insn >> (25 - 5)) & 0x7e0)
                                 | ((insn >> (8 - 1)) & 0x1e)
                                 | ((insn << (11 - 7)) & (1 << 11));
-                            self.pc += imm;
+                            let imm = sext!(imm as i32, 12);
+                            let (target,_) = self.pc.overflowing_add(imm as u32);
+                            self.pc = target;
                         } else {
                             self.pc += 4;
                         }
@@ -389,7 +464,7 @@ impl VMMemory {
             }
         }
 
-        panic!("No fitting mem range found.");
+        panic!("No fitting mem range found for {:#010x}.", base);
     }
 
     /// Returns the size of the loaded data.
@@ -408,7 +483,21 @@ impl VMMemory {
             }
         }
 
-        panic!("No fitting mem range found.");
+        panic!("No fitting mem range found for {:#010x}.", base);
+    }
+
+    fn write_u32(&mut self, addr: u32, val: u32) {
+        let addr = addr as usize;
+        for mem in &mut self.ranges {
+            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
+                let offset = addr - mem.base;
+
+                (&mut mem.mem[offset..]).put_u32_le(val);
+                return;
+            }
+        }
+
+        panic!("No fitting mem range found for {:#010x}.", addr);
     }
 }
 
