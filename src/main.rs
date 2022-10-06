@@ -264,7 +264,7 @@ impl RV32CPU {
                     }
                     6 => {
                         // c.swsp
-                        let imm = ((insn >> 5) & 0x3c) | ((insn >> 1) & 0xc0);
+                        let imm = ((insn >> 7) & 0x3c) | ((insn >> 1) & 0xc0);
                         let addr = self.regs[2] + imm;
                         self.mem.write_u32(addr, self.regs[rs2 as usize]);
 
