@@ -36,6 +36,8 @@ struct RV32CPU {
     mtvec: u32,
     mscratch: u32,
     misa: u32,
+
+    callstack: Vec<usize>,
 }
 
 impl RV32CPU {
@@ -53,7 +55,19 @@ impl RV32CPU {
                 (1<<12) |   // M
                 (1<<0) |    // A
                 (1<<2), // C
+
+            callstack: Vec::new(),
         }
+    }
+
+    fn die(&self, reason: &str) -> ! {
+        println!("{:?}", self);
+        println!("callstack: {:#010x?}", self.callstack);
+        panic!("{}", reason);
+    }
+
+    fn illegal_instruction(&self) -> ! {
+        self.die("illegal instruction");
     }
 
     fn read_csr(&self, csr: u32) -> u32 {
@@ -95,8 +109,8 @@ impl RV32CPU {
 
         // println!("\tq={} op={:#04x}", quadrant, opcode);
 
-        if false && self.pc == 0x80003248 {
-            panic!("{:?}", self);
+        if false && self.pc == 0x80000de6 {
+            self.die("");
         }
 
         match quadrant {
@@ -112,7 +126,7 @@ impl RV32CPU {
                             | ((insn >> 4) & 0x04)
                             | ((insn >> 2) & 0x08);
                         if imm == 0 {
-                            panic!("illegal instruction");
+                            self.illegal_instruction();
                         }
                         self.regs[rd as usize] = self.regs[2] + imm;
                         self.pc += 2;
@@ -126,6 +140,16 @@ impl RV32CPU {
 
                         let val = self.mem.read_u32(addr);
                         self.regs[rd as usize] = val;
+                        self.pc += 2;
+                    }
+                    6 => {
+                        // c.sw
+                        let imm =
+                            ((insn >> 7) & 0x38) | ((insn >> 4) & 0x04) | ((insn << 1) & 0x40);
+                        let rs1 = (insn >> 7) & 7 | 8;
+                        let addr = self.regs[rs1 as usize].wrapping_add(imm);
+                        let val = self.regs[rd as usize];
+                        self.mem.write_u32(addr, val);
                         self.pc += 2;
                     }
                     _ => unimplemented!("compact0 function {}", funct3),
@@ -158,6 +182,7 @@ impl RV32CPU {
                         let imm = sext!(imm as i32, 11);
 
                         self.regs[1] = self.pc + 2;
+                        self.callstack.push(self.pc as usize);
                         self.pc = self.pc.wrapping_add(imm as u32);
                     }
                     2 => {
@@ -172,15 +197,15 @@ impl RV32CPU {
                     3 => {
                         if rd == 2 {
                             // c.addi16sp
-                            let imm = ((insn >> 3) & 0x200)
-                                | ((insn >> 2) & 0x10)
-                                | ((insn << 1) & 0x40)
-                                | ((insn << 4) & 0x100)
-                                | ((insn << 3) & 0x20);
+                            let imm = ((insn >> 3) & 0x200) |
+                                ((insn >> 2) & 0x10) |
+                                ((insn << 1) & 0x40) |
+                                ((insn << 4) & 0x180) |
+                                ((insn << 3) & 0x20);
                             let imm = sext!(imm as i32, 9);
 
                             if imm == 0 {
-                                panic!("illegal instruction");
+                                self.illegal_instruction();
                             }
 
                             self.regs[2] = self.regs[2].wrapping_add(imm as u32);
@@ -199,7 +224,7 @@ impl RV32CPU {
                                 let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
 
                                 if imm & 0x20 > 0 {
-                                    panic!("illegal instruction");
+                                    self.illegal_instruction();
                                 }
 
                                 if funct3 == 0 {
@@ -226,7 +251,7 @@ impl RV32CPU {
                                     1 => self.regs[rd as usize] ^= self.regs[rs2 as usize], // c.xor
                                     2 => self.regs[rd as usize] |= self.regs[rs2 as usize], // c.or
                                     3 => self.regs[rd as usize] &= self.regs[rs2 as usize], // c.and
-                                    _ => panic!("illegal instruction"),
+                                    _ => self.illegal_instruction(),
                                 }
                             }
                             _ => unreachable!(),
@@ -294,7 +319,7 @@ impl RV32CPU {
                         // c.slli
                         let imm = ((insn >> 7) & 0x20) | rs2;
                         if imm & 0x20 > 0 {
-                            panic!("illegal instruction");
+                            self.illegal_instruction();
                         }
 
                         if rd != 0 {
@@ -304,7 +329,7 @@ impl RV32CPU {
                     }
                     2 => {
                         // c.lwsp
-                        let imm = ((insn >> 7) & 0x20) | ((insn << 4) & 0x80) | (rs2 & 0x1c);
+                        let imm = ((insn >> 7) & 0x20) | ((insn << 4) & 0xc0) | (rs2 & 0x1c);
                         let addr = self.regs[2] + imm;
                         let val = self.mem.read_u32(addr);
                         if rd != 0 {
@@ -318,7 +343,11 @@ impl RV32CPU {
                             if rs2 == 0 {
                                 // c.jr
                                 if rd == 0 {
-                                    panic!("illegal instruction");
+                                    self.illegal_instruction();
+                                }
+
+                                if rd == 1 {
+                                    self.callstack.pop();
                                 }
 
                                 self.pc = self.regs[rd as usize] & 0xfffffffe;
@@ -338,7 +367,8 @@ impl RV32CPU {
                                 } else {
                                     // c.jalr
                                     let val = self.pc + 2;
-                                    self.pc = self.regs[rd as usize] & !1;
+                                    self.callstack.push(self.pc as usize);
+                                    self.pc = self.regs[rd as usize] & 0xfffffffe;
                                     self.regs[1] = val;
                                 }
                             } else {
@@ -503,6 +533,9 @@ impl RV32CPU {
 
                         if rd != 0 {
                             self.regs[rd as usize] = val;
+                            self.callstack.push((val-4) as usize);
+                        } else {
+                            self.callstack.pop();
                         }
                     }
                     0x6f => {
@@ -516,6 +549,7 @@ impl RV32CPU {
 
                         if rd != 0 {
                             self.regs[rd as usize] = self.pc + 4;
+                            self.callstack.push(self.pc as usize);
                         }
 
                         let (target, _) = u32::overflowing_add(self.pc, imm as u32);
@@ -559,6 +593,7 @@ impl RV32CPU {
                     }
                     0x33 => {
                         let imm = insn >> 25;
+                        let imm = sext!(imm as i32, 6) as u32;
                         let mut val = self.regs[rs1 as usize];
                         let val2 = self.regs[rs2 as usize];
 
@@ -566,7 +601,7 @@ impl RV32CPU {
                             unimplemented!();
                         } else {
                             if (imm & !0x20) != 0 {
-                                panic!("illegal instruction");
+                                self.illegal_instruction();
                             }
 
                             let funct3 = ((insn >> 12) & 7) | ((insn >> (30 - 3)) & (1 << 3));
@@ -593,9 +628,9 @@ impl RV32CPU {
                                     val &= val2;
                                 }
                                 8 => {
-                                    val -= val2;
+                                    val = val.wrapping_sub(val2);
                                 }
-                                _ => panic!("illegal instruction"),
+                                _ => self.illegal_instruction(),
                             }
 
                             if rd != 0 {
