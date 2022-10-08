@@ -17,6 +17,7 @@ struct VMConfig {
     memory_mb: usize,
     bios_path: String,
     kernel_path: String,
+    dtb_path: String,
     drive: String,
 }
 
@@ -25,7 +26,7 @@ struct TLBEntry {
     //TODO
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct RV32CPU {
     mem: VMMemory,
     pc: u32,
@@ -82,6 +83,7 @@ impl RV32CPU {
         //TODO: TLB (this probably needs a caching system, reading from memory
         // would need to search the ranges and then the tlb to translate an addr)
 
+
         let insn = self.mem.read_ins(self.pc as usize);
 
         let opcode = insn & 0x7f;
@@ -92,10 +94,16 @@ impl RV32CPU {
 
         println!(
             "pc={:#010x} insn={:08x}",
-            self.pc, insn,
+            self.pc, insn
         );
 
-        match insn & 3 {
+        // println!("\tq={} op={:#04x}", quadrant, opcode);
+
+        //if self.pc == 0x80001322 {
+        //    panic!("{:?}", self);
+        //}
+
+        match quadrant {
             0b00 => {
                 let funct3 = (insn >> 13) & 7;
                 let rd = ((insn >> 2) & 7) | 8;
@@ -135,6 +143,8 @@ impl RV32CPU {
                         // c.addi
                         if rd != 0 {
                             let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
+                            let imm = sext!(imm, 6);
+
                             self.regs[rd as usize] += imm;
                             self.pc += 2;
                         }
@@ -147,9 +157,19 @@ impl RV32CPU {
                             | ((insn << 1) & 0x80)
                             | ((insn >> 2) & 0x04)
                             | ((insn << 3) & 0x20);
+                        let imm = sext!(imm, 12);
 
                         self.regs[1] = self.pc + 2;
                         self.pc += imm;
+                    }
+                    2 => {
+                        // c.li
+                        if rd != 0 {
+                            let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
+                            let imm = sext!(imm, 6);
+                            self.regs[rd as usize] = imm;
+                        }
+                        self.pc += 2;
                     }
                     3 => {
                         if rd == 2 {
@@ -159,6 +179,7 @@ impl RV32CPU {
                                 | ((insn << 1) & 0x40)
                                 | ((insn << 4) & 0x100)
                                 | ((insn << 3) & 0x20);
+                            let imm = sext!(imm, 10);
 
                             if imm == 0 {
                                 panic!("illegal instruction");
@@ -178,20 +199,23 @@ impl RV32CPU {
                         match funct3 {
                             0|1 => {
                                 let imm = ((insn >> 7) & 0x20) |
-                                    ((insn >> 2) & 0x0f);
+                                    ((insn >> 2) & 0x1f);
 
                                 if imm & 0x20 > 0 {
                                     panic!("illegal instruction");
                                 }
 
+
                                 if funct3 == 0 {
+                                    // c.srli
+                                    self.regs[rd as usize] >>= imm;
+
+                                } else {
+                                    // c.srai
                                     let r = self.regs[rd as usize] as i32 >> imm as i32;
                                     self.regs[rd as usize] = r as u32;
-                                } else {
-                                    self.regs[rd as usize] >>= imm;
                                 }
                             }
-                            2 => {}
                             3 => {
                                 let rs2 = ((insn >> 2) & 7) | 8;
                                 let funct3 = ((insn >> 5) & 3) | ((insn >> 10) & 4);
@@ -286,13 +310,13 @@ impl RV32CPU {
                         // addi...
 
                         let funct3 = (insn >> 12) & 7;
-                        let imm = insn >> 20;
+                        let imm = (insn as i32 >> 20) as u32;
                         let val;
 
                         match funct3 {
                             0 => {
                                 // addi
-                                val = self.regs[rs1 as usize] + imm;
+                                val = self.regs[rs1 as usize].wrapping_add(imm);
                             }
                             1 => {
                                 // slli
@@ -301,9 +325,12 @@ impl RV32CPU {
                             5 => {
                                 if imm & 0x400 > 0 {
                                     //srai
+                                    let imm = imm & 0x1f;
                                     let r = (self.regs[rs1 as usize] as i32) >> imm as i32;
                                     val = r as u32;
                                 } else {
+                                    // srli
+                                    let imm = imm & 0x1f;
                                     val = self.regs[rs1 as usize] >> imm;
                                 }
                             }
@@ -397,6 +424,10 @@ impl RV32CPU {
                             }
                             2 => {
                                 // blt, bge
+                                cond = (self.regs[rs1 as usize] as i32) < (self.regs[rs2 as usize] as i32);
+                            }
+                            3 => {
+                                // bltu, bgeu
                                 cond = self.regs[rs1 as usize] < self.regs[rs2 as usize];
                             }
                             _ => {
@@ -466,9 +497,13 @@ impl RV32CPU {
                     0x37 => {
                         // lui
                         if rd != 0 {
-                            self.regs[rd as usize] = insn & 0xfffff000;
+                            let imm = insn & 0xfffff000;
+                            self.regs[rd as usize] = imm;
                         }
                         self.pc += 4;
+                    }
+                    0x93 => {
+                        panic!();
                     }
                     _ => {
                         panic!("Unknown opcode {:#x}, core: {:x?}", opcode, self)
@@ -516,6 +551,19 @@ impl std::fmt::Debug for VMRAMRange {
             .field("base", &self.base)
             .field("len", &self.mem.len())
             .finish()
+    }
+}
+
+impl std::fmt::Debug for RV32CPU {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "CORE:")?;
+        writeln!(f, "pc: {:#010x}", self.pc)?;
+
+        for n in 0..32 {
+            writeln!(f, "r{:02}: {:#010x}", n, self.regs[n])?;
+        }
+
+        Ok(())
     }
 }
 
@@ -614,6 +662,7 @@ impl VMMachine {
 
         // TODO: device tree
         let fdt_base = 0x1000 + 8 * 8;
+        cpu.mem.load_from_file(fdt_base, &cfg.dtb_path);
 
         // jump_addr = 0x80000000
         //
@@ -626,7 +675,7 @@ impl VMMachine {
         let mut trampoline: Vec<u8> = Vec::new();
         trampoline.put_u32_le(0x297 + 0x80000000 - 0x1000);
         trampoline.put_u32_le(0x597);
-        trampoline.put_u32_le(0x58593 + ((fdt_base - 4) << 20));
+        trampoline.put_u32_le(0x58593 + ((fdt_base as u32 - 4) << 20));
         trampoline.put_u32_le(0xf1402573);
         trampoline.put_u32_le(0x00028067);
 
@@ -652,9 +701,10 @@ fn main() {
     let cfg = VMConfig {
         machine: VMMachineSpec::RV32,
         memory_mb: 128,
-        bios_path: String::from("./configs/bbl32.bin"),
-        kernel_path: String::from("./configs/kernel-riscv32.bin"),
-        drive: String::from("./configs/root-riscv32.bin"),
+        bios_path: String::from("./configs/rv32-linux/bbl32.bin"),
+        kernel_path: String::from("./configs/rv32-linux/kernel-riscv32.bin"),
+        dtb_path: String::from("./configs/rv32-linux/riscvemu.dtb"),
+        drive: String::from("./configs/rv32-linux/root-riscv32.bin"),
     };
 
     let mut machine = VMMachine::from_config(&cfg);
