@@ -139,7 +139,7 @@ impl RV32CPU {
                         // c.addi
                         if rd != 0 {
                             let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
-                            let imm = sext!(imm as i32, 6);
+                            let imm = sext!(imm as i32, 5);
 
                             self.regs[rd as usize] += imm as u32;
                             self.pc += 2;
@@ -164,7 +164,7 @@ impl RV32CPU {
                         // c.li
                         if rd != 0 {
                             let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
-                            let imm = sext!(imm as i32, 6);
+                            let imm = sext!(imm as i32, 5);
                             self.regs[rd as usize] = imm as u32;
                         }
                         self.pc += 2;
@@ -372,7 +372,7 @@ impl RV32CPU {
                     0x23 => {
                         // store
                         let funct3 = (insn >> 12) & 7;
-                        let imm = ((insn >> 20) & 0xfe) | ((insn >> 7) & 0x1f);
+                        let imm = ((insn >> 20) & 0xfe0) | ((insn >> 7) & 0x1f);
                         let imm = sext!(imm as i32, 11);
                         let addr = self.regs[rs1 as usize].wrapping_add(imm as u32);
 
