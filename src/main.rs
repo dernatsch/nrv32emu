@@ -91,20 +91,26 @@ impl RV32CPU {
         match csr {
             0x106 => self.scounteren,
             0x180 => self.satp,
-            0xf14 => self.mhartid,
             0x301 => self.misa,
+            0x302 => self.medeleg,
+            0x303 => self.mideleg,
             0x304 => self.mie,
             0x305 => self.mtvec,
             0x306 => self.mcounteren,
             0x340 => self.mscratch,
-            0x303 => self.mideleg,
-            0x302 => self.medeleg,
+            0xf14 => self.mhartid,
             _ => unimplemented!("unimplemented csr read value {csr:#x}"),
         }
     }
 
     fn write_csr(&mut self, csr: u32, val: u32) {
         match csr {
+            0x106 => {
+                self.scounteren = val;
+            }
+            0x180 => {
+                self.satp = val;
+            }
             0x302 => {
                 self.medeleg = val;
             }
@@ -122,13 +128,6 @@ impl RV32CPU {
             }
             0x340 => {
                 self.mscratch = val;
-            }
-            0x106 => {
-                self.scounteren = val;
-            }
-            0x180 => {
-                self.satp = val;
-                println!("WARN: satp writing not supported ({:#x})", val);
             }
             _ => unimplemented!("unimplemented csr write value {csr:#x}"),
         }
