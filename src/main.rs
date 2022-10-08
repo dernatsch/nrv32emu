@@ -139,9 +139,9 @@ impl RV32CPU {
                         // c.addi
                         if rd != 0 {
                             let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
-                            let imm = sext!(imm, 6);
+                            let imm = sext!(imm as i32, 6);
 
-                            self.regs[rd as usize] += imm;
+                            self.regs[rd as usize] += imm as u32;
                             self.pc += 2;
                         }
                     }
@@ -164,8 +164,8 @@ impl RV32CPU {
                         // c.li
                         if rd != 0 {
                             let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
-                            let imm = sext!(imm, 6);
-                            self.regs[rd as usize] = imm;
+                            let imm = sext!(imm as i32, 6);
+                            self.regs[rd as usize] = imm as u32;
                         }
                         self.pc += 2;
                     }
@@ -177,13 +177,13 @@ impl RV32CPU {
                                 | ((insn << 1) & 0x40)
                                 | ((insn << 4) & 0x100)
                                 | ((insn << 3) & 0x20);
-                            let imm = sext!(imm, 10);
+                            let imm = sext!(imm as i32, 9);
 
                             if imm == 0 {
                                 panic!("illegal instruction");
                             }
 
-                            self.regs[2] += imm;
+                            self.regs[2] = self.regs[2].wrapping_add(imm as u32);
                             self.pc += 2;
                         } else {
                             // c.lui
@@ -236,13 +236,14 @@ impl RV32CPU {
                     }
                     5 => {
                         // c.j
-                        let imm = ((insn >> 1) & 0x800)
-                            | ((insn >> 7) & 0x10)
-                            | ((insn >> 1) & 0x300)
-                            | ((insn << 2) & 0x400)
-                            | ((insn >> 1) & 0x40)
-                            | ((insn >> 2) & 0x0e)
-                            | ((insn << 3) & 0x20);
+                        let imm = ((insn >> 1) & 0x800) |
+                            ((insn >> 7) & 0x10) |
+                            ((insn >> 1) & 0x300) |
+                            ((insn << 2) & 0x400) |
+                            ((insn >> 1) & 0x40) |
+                            ((insn << 1) & 0x80) |
+                            ((insn >> 2) & 0x0e) |
+                            ((insn << 3) & 0x20);
                         let imm = sext!(imm as i32, 11);
 
                         self.pc = self.pc.wrapping_add(imm as u32);
