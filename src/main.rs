@@ -21,12 +21,36 @@ struct VMConfig {
     drive: String,
 }
 
-#[derive(Clone, Debug)]
-struct TLBEntry {
-    //TODO
+trait MemMapDevice {
+    fn read(&mut self, cpu: &mut RV32CPU, offset: usize, size: usize) -> u32;
+    fn write(&mut self, cpu: &mut RV32CPU, offset: usize, val: u32, size: usize);
+    fn size(&self) -> usize;
 }
 
-#[derive(Clone)]
+#[derive(Debug)]
+struct CLINT {
+}
+
+impl CLINT {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+impl MemMapDevice for CLINT {
+    fn read(&mut self, cpu: &mut RV32CPU, offset: usize, size: usize) -> u32 {
+        0
+    }
+
+    fn write(&mut self, cpu: &mut RV32CPU, offset: usize, val: u32, size: usize) {
+
+    }
+
+    fn size(&self) -> usize {
+        0xc0000
+    }
+}
+
 struct RV32CPU {
     mem: VMMemory,
     pc: u32,
@@ -512,6 +536,10 @@ impl RV32CPU {
                                 // slli
                                 val = self.regs[rs1 as usize] << imm;
                             }
+                            4 => {
+                                // xori
+                                val = self.regs[rs1 as usize] ^ imm;
+                            }
                             5 => {
                                 if imm & 0x400 > 0 {
                                     //srai
@@ -665,7 +693,7 @@ impl RV32CPU {
                                     val += val2;
                                 }
                                 1 => {
-                                    val <<= val2;
+                                    val = val.wrapping_shl(val2);
                                 }
                                 2 | 3 => {
                                     val = if val < val2 { 1 } else { 0 };
@@ -715,7 +743,7 @@ impl RV32CPU {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct VMMachine {
     cpu: RV32CPU,
     ram_size: usize,
@@ -767,20 +795,44 @@ impl std::fmt::Debug for RV32CPU {
     }
 }
 
-#[derive(Clone, Debug)]
+struct DeviceRange {
+    base: usize,
+    len: usize,
+    device: Box<dyn MemMapDevice>,
+}
+
+impl DeviceRange {
+    fn new(base: usize, dev: Box<dyn MemMapDevice>) -> Self {
+        Self {
+            base,
+            len: dev.size(),
+            device: dev,
+        }
+    }
+}
+
 struct VMMemory {
     //TODO: abstract, so not only vec-ram can be used
     ranges: Vec<VMRAMRange>,
+    devices: Vec<DeviceRange>,
 }
 
 impl VMMemory {
     fn new() -> Self {
-        Self { ranges: Vec::new() }
+        Self {
+            ranges: Vec::new(),
+            devices: Vec::new(),
+        }
     }
 
     fn register_ram(&mut self, base: usize, size: usize) {
         let range = VMRAMRange::new(base, size);
         self.ranges.push(range);
+    }
+
+    fn register_device(&mut self, base: usize, dev: Box<dyn MemMapDevice>) {
+        let range = DeviceRange::new(base, dev);
+        self.devices.push(range);
     }
 
     fn load_from_slice(&mut self, base: usize, data: &[u8]) -> usize {
@@ -879,6 +931,7 @@ impl VMMachine {
 
         cpu.mem.register_ram(0, 0x10000);
         cpu.mem.register_ram(RAM_BASE, ram_size);
+        cpu.mem.register_device(0x2000000, Box::new(CLINT::new()));
 
         let bl_len = cpu.mem.load_from_file(RAM_BASE, &cfg.bios_path);
         let kernel_align = 4 << 20;
