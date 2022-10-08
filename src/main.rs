@@ -70,7 +70,7 @@ impl RV32CPU {
             mip: 0,
             mideleg: 0,
             medeleg: 0,
-            
+
             satp: 0,
 
             callstack: Vec::new(),
@@ -206,20 +206,21 @@ impl RV32CPU {
                             let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
                             let imm = sext!(imm as i32, 5);
 
-                            self.regs[rd as usize] = self.regs[rd as usize].wrapping_add(imm as u32);
+                            self.regs[rd as usize] =
+                                self.regs[rd as usize].wrapping_add(imm as u32);
                             self.pc += 2;
                         }
                     }
                     1 => {
                         // c.jal
-                        let imm = ((insn >> 1) & 0x800) |
-                            ((insn >> 7) & 0x10) |
-                            ((insn >> 1) & 0x300) |
-                            ((insn << 2) & 0x400) |
-                            ((insn >> 1) & 0x40) |
-                            ((insn << 1) & 0x80) |
-                            ((insn >> 2) & 0x0e) |
-                            ((insn << 3) & 0x20);
+                        let imm = ((insn >> 1) & 0x800)
+                            | ((insn >> 7) & 0x10)
+                            | ((insn >> 1) & 0x300)
+                            | ((insn << 2) & 0x400)
+                            | ((insn >> 1) & 0x40)
+                            | ((insn << 1) & 0x80)
+                            | ((insn >> 2) & 0x0e)
+                            | ((insn << 3) & 0x20);
                         let imm = sext!(imm as i32, 11);
 
                         self.regs[1] = self.pc + 2;
@@ -238,11 +239,11 @@ impl RV32CPU {
                     3 => {
                         if rd == 2 {
                             // c.addi16sp
-                            let imm = ((insn >> 3) & 0x200) |
-                                ((insn >> 2) & 0x10) |
-                                ((insn << 1) & 0x40) |
-                                ((insn << 4) & 0x180) |
-                                ((insn << 3) & 0x20);
+                            let imm = ((insn >> 3) & 0x200)
+                                | ((insn >> 2) & 0x10)
+                                | ((insn << 1) & 0x40)
+                                | ((insn << 4) & 0x180)
+                                | ((insn << 3) & 0x20);
                             let imm = sext!(imm as i32, 9);
 
                             if imm == 0 {
@@ -253,8 +254,7 @@ impl RV32CPU {
                             self.pc += 2;
                         } else {
                             // c.lui
-                            let imm = ((insn << 10) & 0x1f000) |
-                                ((insn << 5) & 0x20000);
+                            let imm = ((insn << 10) & 0x1f000) | ((insn << 5) & 0x20000);
                             let imm = sext!(imm as i32, 17);
 
                             if imm == 0 || rd == 0 || rd == 2 {
@@ -311,14 +311,14 @@ impl RV32CPU {
                     }
                     5 => {
                         // c.j
-                        let imm = ((insn >> 1) & 0x800) |
-                            ((insn >> 7) & 0x10) |
-                            ((insn >> 1) & 0x300) |
-                            ((insn << 2) & 0x400) |
-                            ((insn >> 1) & 0x40) |
-                            ((insn << 1) & 0x80) |
-                            ((insn >> 2) & 0x0e) |
-                            ((insn << 3) & 0x20);
+                        let imm = ((insn >> 1) & 0x800)
+                            | ((insn >> 7) & 0x10)
+                            | ((insn >> 1) & 0x300)
+                            | ((insn << 2) & 0x400)
+                            | ((insn >> 1) & 0x40)
+                            | ((insn << 1) & 0x80)
+                            | ((insn >> 2) & 0x0e)
+                            | ((insn << 3) & 0x20);
                         let imm = sext!(imm as i32, 11);
 
                         self.pc = self.pc.wrapping_add(imm as u32);
@@ -424,7 +424,8 @@ impl RV32CPU {
                             } else {
                                 // c.add
                                 if rd != 0 {
-                                    self.regs[rd as usize] += self.regs[rs2 as usize];
+                                    self.regs[rd as usize] = self.regs[rd as usize]
+                                        .wrapping_add(self.regs[rs2 as usize]);
                                 }
                                 self.pc += 2;
                             }
@@ -587,7 +588,7 @@ impl RV32CPU {
 
                         if rd != 0 {
                             self.regs[rd as usize] = val;
-                            self.callstack.push((val-4) as usize);
+                            self.callstack.push((val - 4) as usize);
                         } else {
                             self.callstack.pop();
                         }
