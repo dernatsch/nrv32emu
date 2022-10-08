@@ -95,7 +95,7 @@ impl RV32CPU {
 
         // println!("\tq={} op={:#04x}", quadrant, opcode);
 
-        if false && self.pc == 0x80000e98 {
+        if false && self.pc == 0x80003248 {
             panic!("{:?}", self);
         }
 
@@ -141,7 +141,7 @@ impl RV32CPU {
                             let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
                             let imm = sext!(imm as i32, 5);
 
-                            self.regs[rd as usize] += imm as u32;
+                            self.regs[rd as usize] = self.regs[rd as usize].wrapping_add(imm as u32);
                             self.pc += 2;
                         }
                     }
@@ -250,6 +250,7 @@ impl RV32CPU {
                     }
                     6 => {
                         // c.beqz
+                        let rs1 = ((insn >> 7) & 7) | 8;
                         let imm = ((insn >> 4) & 0x100)
                             | ((insn >> 7) & 0x18)
                             | ((insn << 1) & 0xc0)
@@ -259,6 +260,23 @@ impl RV32CPU {
                         let target = self.pc.wrapping_add(imm as u32);
 
                         if self.regs[rs1 as usize] == 0 {
+                            self.pc = target;
+                        } else {
+                            self.pc += 2;
+                        }
+                    }
+                    7 => {
+                        // c.bnez
+                        let rs1 = ((insn >> 7) & 7) | 8;
+                        let imm = ((insn >> 4) & 0x100)
+                            | ((insn >> 7) & 0x18)
+                            | ((insn << 1) & 0xc0)
+                            | ((insn >> 2) & 0x06)
+                            | ((insn << 3) & 0x20);
+                        let imm = sext!(imm as i32, 8);
+                        let target = self.pc.wrapping_add(imm as u32);
+
+                        if self.regs[rs1 as usize] != 0 {
                             self.pc = target;
                         } else {
                             self.pc += 2;
