@@ -36,6 +36,13 @@ struct RV32CPU {
     mtvec: u32,
     mscratch: u32,
     misa: u32,
+    mcounteren: u32,
+    scounteren: u32,
+    mie: u32,
+    mip: u32,
+    mideleg: u32,
+    medeleg: u32,
+    satp: u32,
 
     callstack: Vec<usize>,
 }
@@ -56,6 +63,16 @@ impl RV32CPU {
                 (1<<0) |    // A
                 (1<<2), // C
 
+            scounteren: 0,
+            mcounteren: 0,
+
+            mie: 0,
+            mip: 0,
+            mideleg: 0,
+            medeleg: 0,
+            
+            satp: 0,
+
             callstack: Vec::new(),
         }
     }
@@ -72,21 +89,46 @@ impl RV32CPU {
 
     fn read_csr(&self, csr: u32) -> u32 {
         match csr {
+            0x106 => self.scounteren,
+            0x180 => self.satp,
             0xf14 => self.mhartid,
             0x301 => self.misa,
+            0x304 => self.mie,
             0x305 => self.mtvec,
+            0x306 => self.mcounteren,
             0x340 => self.mscratch,
+            0x303 => self.mideleg,
+            0x302 => self.medeleg,
             _ => unimplemented!("unimplemented csr read value {csr:#x}"),
         }
     }
 
     fn write_csr(&mut self, csr: u32, val: u32) {
         match csr {
+            0x302 => {
+                self.medeleg = val;
+            }
+            0x303 => {
+                self.mideleg = val;
+            }
+            0x304 => {
+                self.mie = val;
+            }
             0x305 => {
                 self.mtvec = val & !3;
             }
+            0x306 => {
+                self.mcounteren = val;
+            }
             0x340 => {
                 self.mscratch = val;
+            }
+            0x106 => {
+                self.scounteren = val;
+            }
+            0x180 => {
+                self.satp = val;
+                println!("WARN: satp writing not supported ({:#x})", val);
             }
             _ => unimplemented!("unimplemented csr write value {csr:#x}"),
         }
@@ -212,7 +254,16 @@ impl RV32CPU {
                             self.pc += 2;
                         } else {
                             // c.lui
-                            todo!("c.lui");
+                            let imm = ((insn << 10) & 0x1f000) |
+                                ((insn << 5) & 0x20000);
+                            let imm = sext!(imm as i32, 17);
+
+                            if imm == 0 || rd == 0 || rd == 2 {
+                                self.illegal_instruction();
+                            }
+
+                            self.regs[rd as usize] = imm as u32;
+                            self.pc += 2;
                         }
                     }
                     4 => {
@@ -425,6 +476,10 @@ impl RV32CPU {
                         let addr = self.regs[rs1 as usize].wrapping_add(imm as u32);
 
                         match funct3 {
+                            0 => {
+                                // sb
+                                self.mem.write_u8(addr, self.regs[rs2 as usize]);
+                            }
                             2 => {
                                 // sw
                                 self.mem.write_u32(addr, self.regs[rs2 as usize]);
@@ -787,10 +842,24 @@ impl VMMemory {
         panic!("No fitting mem range found for {:#010x}.", addr);
     }
 
+    fn write_u8(&mut self, addr: u32, val: u32) {
+        let addr = addr as usize;
+        for mem in &mut self.ranges {
+            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 1) {
+                let offset = addr - mem.base;
+
+                mem.mem[offset] = val as u8;
+                return;
+            }
+        }
+
+        panic!("No fitting mem range found for {:#010x}.", addr);
+    }
+
     fn read_u8(&mut self, addr: u32) -> u8 {
         let addr = addr as usize;
         for mem in &self.ranges {
-            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
+            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 1) {
                 let offset = addr - mem.base;
 
                 return mem.mem[offset];
