@@ -492,7 +492,7 @@ impl RV32CPU {
                     0x17 => {
                         // auipc
                         if rd != 0 {
-                            self.regs[rd as usize] = self.pc + (insn & 0xfffff000);
+                            self.regs[rd as usize] = self.pc.wrapping_add(insn & 0xfffff000);
                         }
                         self.pc += 4;
                     }
