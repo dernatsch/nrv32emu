@@ -83,7 +83,6 @@ impl RV32CPU {
         //TODO: TLB (this probably needs a caching system, reading from memory
         // would need to search the ranges and then the tlb to translate an addr)
 
-
         let insn = self.mem.read_ins(self.pc as usize);
 
         let opcode = insn & 0x7f;
@@ -92,16 +91,13 @@ impl RV32CPU {
         let rs1 = (insn >> 15) & 0x1f;
         let rs2 = (insn >> 20) & 0x1f;
 
-        println!(
-            "pc={:#010x} insn={:08x}",
-            self.pc, insn
-        );
+        println!("pc={:#010x} insn={:08x}", self.pc, insn);
 
         // println!("\tq={} op={:#04x}", quadrant, opcode);
 
-        //if self.pc == 0x80001322 {
-        //    panic!("{:?}", self);
-        //}
+        if false && self.pc == 0x80000e98 {
+            panic!("{:?}", self);
+        }
 
         match quadrant {
             0b00 => {
@@ -151,16 +147,18 @@ impl RV32CPU {
                     }
                     1 => {
                         // c.jal
-                        let imm = ((insn >> 1) & 0xb40)
-                            | ((insn >> 7) & 0x10)
-                            | ((insn << 2) & 0x400)
-                            | ((insn << 1) & 0x80)
-                            | ((insn >> 2) & 0x04)
-                            | ((insn << 3) & 0x20);
-                        let imm = sext!(imm, 12);
+                        let imm = ((insn >> 1) & 0x800) |
+                            ((insn >> 7) & 0x10) |
+                            ((insn >> 1) & 0x300) |
+                            ((insn << 2) & 0x400) |
+                            ((insn >> 1) & 0x40) |
+                            ((insn << 1) & 0x80) |
+                            ((insn >> 2) & 0x0e) |
+                            ((insn << 3) & 0x20);
+                        let imm = sext!(imm as i32, 11);
 
                         self.regs[1] = self.pc + 2;
-                        self.pc += imm;
+                        self.pc = self.pc.wrapping_add(imm as u32);
                     }
                     2 => {
                         // c.li
@@ -197,24 +195,28 @@ impl RV32CPU {
                         let rd = ((insn >> 7) & 7) | 8;
 
                         match funct3 {
-                            0|1 => {
-                                let imm = ((insn >> 7) & 0x20) |
-                                    ((insn >> 2) & 0x1f);
+                            0 | 1 => {
+                                let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
 
                                 if imm & 0x20 > 0 {
                                     panic!("illegal instruction");
                                 }
 
-
                                 if funct3 == 0 {
                                     // c.srli
                                     self.regs[rd as usize] >>= imm;
-
                                 } else {
                                     // c.srai
                                     let r = self.regs[rd as usize] as i32 >> imm as i32;
                                     self.regs[rd as usize] = r as u32;
                                 }
+                            }
+                            2 => {
+                                // c.andi
+                                let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
+                                let imm = sext!(imm as i32, 5) as u32;
+
+                                self.regs[rd as usize] &= imm;
                             }
                             3 => {
                                 let rs2 = ((insn >> 2) & 7) | 8;
@@ -227,10 +229,39 @@ impl RV32CPU {
                                     _ => panic!("illegal instruction"),
                                 }
                             }
-                            _ => unreachable!()
+                            _ => unreachable!(),
                         }
 
                         self.pc += 2;
+                    }
+                    5 => {
+                        // c.j
+                        let imm = ((insn >> 1) & 0x800)
+                            | ((insn >> 7) & 0x10)
+                            | ((insn >> 1) & 0x300)
+                            | ((insn << 2) & 0x400)
+                            | ((insn >> 1) & 0x40)
+                            | ((insn >> 2) & 0x0e)
+                            | ((insn << 3) & 0x20);
+                        let imm = sext!(imm as i32, 11);
+
+                        self.pc = self.pc.wrapping_add(imm as u32);
+                    }
+                    6 => {
+                        // c.beqz
+                        let imm = ((insn >> 4) & 0x100)
+                            | ((insn >> 7) & 0x18)
+                            | ((insn << 1) & 0xc0)
+                            | ((insn >> 2) & 0x06)
+                            | ((insn << 3) & 0x20);
+                        let imm = sext!(imm as i32, 8);
+                        let target = self.pc.wrapping_add(imm as u32);
+
+                        if self.regs[rs1 as usize] == 0 {
+                            self.pc = target;
+                        } else {
+                            self.pc += 2;
+                        }
                     }
                     _ => unimplemented!("compact1 function {}", funct3),
                 }
@@ -254,9 +285,7 @@ impl RV32CPU {
                     }
                     2 => {
                         // c.lwsp
-                        let imm = ((insn >> 7) & 0x20) |
-                            ((insn << 4) & 0x80) |
-                            (rs2 & 0x1c);
+                        let imm = ((insn >> 7) & 0x20) | ((insn << 4) & 0x80) | (rs2 & 0x1c);
                         let addr = self.regs[2] + imm;
                         let val = self.mem.read_u32(addr);
                         if rd != 0 {
@@ -283,7 +312,23 @@ impl RV32CPU {
                                 self.pc += 2;
                             }
                         } else {
-                            todo!();
+                            if rs2 == 0 {
+                                if rd == 0 {
+                                    // c.ebreak
+                                    todo!();
+                                } else {
+                                    // c.jalr
+                                    let val = self.pc + 2;
+                                    self.pc = self.regs[rd as usize] & !1;
+                                    self.regs[1] = val;
+                                }
+                            } else {
+                                // c.add
+                                if rd != 0 {
+                                    self.regs[rd as usize] += self.regs[rs2 as usize];
+                                }
+                                self.pc += 2;
+                            }
                         }
                     }
                     6 => {
@@ -299,6 +344,47 @@ impl RV32CPU {
             }
             0b11 => {
                 match opcode {
+                    0x03 => {
+                        // load
+                        let funct3 = (insn >> 12) & 7;
+                        let imm = (insn as i32) >> 20;
+                        let addr = self.regs[rs1 as usize].wrapping_add(imm as u32);
+                        let val;
+
+                        match funct3 {
+                            2 => {
+                                // lw
+                                val = self.mem.read_u32(addr);
+                            }
+                            4 => {
+                                // lbu
+                                val = self.mem.read_u8(addr) as u32;
+                            }
+                            _ => unimplemented!("load {}", funct3),
+                        }
+
+                        if rd != 0 {
+                            self.regs[rd as usize] = val;
+                        }
+                        self.pc += 4;
+                    }
+                    0x23 => {
+                        // store
+                        let funct3 = (insn >> 12) & 7;
+                        let imm = ((insn >> 20) & 0xfe) | ((insn >> 7) & 0x1f);
+                        let imm = sext!(imm as i32, 11);
+                        let addr = self.regs[rs1 as usize].wrapping_add(imm as u32);
+
+                        match funct3 {
+                            2 => {
+                                // sw
+                                self.mem.write_u32(addr, self.regs[rs2 as usize]);
+                            }
+                            _ => unimplemented!("store {}", funct3),
+                        }
+
+                        self.pc += 4;
+                    }
                     0x17 => {
                         // auipc
                         if rd != 0 {
@@ -333,6 +419,10 @@ impl RV32CPU {
                                     let imm = imm & 0x1f;
                                     val = self.regs[rs1 as usize] >> imm;
                                 }
+                            }
+                            7 => {
+                                // andi
+                                val = self.regs[rs1 as usize] & imm;
                             }
                             _ => {
                                 panic!("Unknown function {}, core: {:x?}", funct3, self)
@@ -424,7 +514,8 @@ impl RV32CPU {
                             }
                             2 => {
                                 // blt, bge
-                                cond = (self.regs[rs1 as usize] as i32) < (self.regs[rs2 as usize] as i32);
+                                cond = (self.regs[rs1 as usize] as i32)
+                                    < (self.regs[rs2 as usize] as i32);
                             }
                             3 => {
                                 // bltu, bgeu
@@ -636,6 +727,19 @@ impl VMMemory {
                 let offset = addr - mem.base;
 
                 return (&mem.mem[offset..]).get_u32_le();
+            }
+        }
+
+        panic!("No fitting mem range found for {:#010x}.", addr);
+    }
+
+    fn read_u8(&mut self, addr: u32) -> u8 {
+        let addr = addr as usize;
+        for mem in &self.ranges {
+            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
+                let offset = addr - mem.base;
+
+                return mem.mem[offset];
             }
         }
 
