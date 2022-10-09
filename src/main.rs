@@ -26,6 +26,8 @@ struct RV32CPU {
     pc: u32,
     regs: [u32; 32],
 
+    privl: u32,
+
     mhartid: u32,
     mtvec: u32,
     mscratch: u32,
@@ -43,11 +45,15 @@ struct RV32CPU {
     sstatus: u32,
     stvec: u32,
     sie: u32,
+    scause: u32,
+    sepc: u32,
+    stval: u32,
 
     pmpaddr: [u32; 16],
     pmpcfg: [u32; 4],
 
-    callstack: Vec<usize>,
+    pending_exception: Option<u32>,
+    pending_tval: u32,
 }
 
 const CLINT_BASE: usize = 0x02000000;
@@ -55,12 +61,16 @@ const CLINT_SIZE: usize = 0x000c0000;
 const PLIC_BASE: usize = 0x40100000;
 const PLIC_SIZE: usize = 0x00400000;
 
+const CAUSE_FETCH_PAGE_FAULT: u32 = 0x0c;
+const CAUSE_INTERRUPT: u32 = 0x80;
+
 impl RV32CPU {
     fn new() -> Self {
         Self {
             mem: VMMemory::new(),
             pc: 0x1000,
             regs: [0u32; 32],
+            privl: 3,
             mhartid: 0,
             mtvec: 0,
             mscratch: 0,
@@ -70,6 +80,8 @@ impl RV32CPU {
                 (1<<8) |    // I
                 (1<<12) |   // M
                 (1<<0) |    // A
+                // (1<<5) |    // F
+                // (1<<3) |    // D
                 (1<<2), // C
 
             mcounteren: 0,
@@ -85,11 +97,15 @@ impl RV32CPU {
             sstatus: 0,
             stvec: 0,
             sie: 0,
+            scause: 0,
+            sepc: 0,
+            stval: 0,
 
             pmpcfg: [0u32; 4],
             pmpaddr: [0u32; 16],
 
-            callstack: Vec::new(),
+            pending_exception: None,
+            pending_tval: 0,
         }
     }
 
@@ -97,7 +113,60 @@ impl RV32CPU {
 
     fn plic_write_u32(&mut self, offset: usize, val: u32) {}
 
-    fn read_ins(&self, base: usize) -> u32 {
+    fn get_phys_addr(&self, base: u32) -> Option<u32> {
+        const LEVELS: i32 = 2;
+
+        if self.privl == 3 {
+            // no paging in M mode
+            return Some(base);
+        }
+
+        let mode = self.satp >> 31;
+        if mode == 0 {
+            // paging disabled
+            Some(base)
+        } else {
+            let mut level = LEVELS - 1;
+            let mut pte_addr = (self.satp << 12) as usize;
+            while level > 0 {
+                let vaddr_shift = 12 + level*10;
+                let vpn = (base as usize >> vaddr_shift) & 0x3ff;
+                pte_addr = pte_addr + vpn*4;
+                let pte = self.read_phys(pte_addr);
+                let paddr = (pte as usize >> 10) << 12;
+
+                if pte & 1 == 0 {
+                    // invalid entry
+                    return None;
+                }
+
+                let xwr = (pte >> 1) & 7;
+                if xwr == 0 {
+                    pte_addr = paddr;
+                    level -= 1;
+                } else {
+                    if xwr == 2 || xwr == 6 {
+                        return None;
+                    }
+
+                    // TODO: check privilege
+                    // TODO: check protection
+                    // TODO: check access type
+                    // TODO: set access flag
+                    // TODO: set dirty flag on write
+
+                    let vaddr_mask: u32 = (1 << vaddr_shift) - 1;
+                    let phys_addr: u32 = (base as u32 & vaddr_mask) | (paddr as u32 & !vaddr_mask);
+                    return Some(phys_addr);
+                }
+            }
+
+            None
+        }
+    }
+
+    fn read_phys(&self, base: usize) -> u32 {
+        let base = base as usize;
         for mem in &self.mem.ranges {
             if base >= mem.base && base < (mem.base + mem.mem.len()) {
                 let offset = base - mem.base;
@@ -106,105 +175,148 @@ impl RV32CPU {
             }
         }
 
-        panic!("No fitting mem range found for {:#010x}.", base);
+        self.die(&format!("No fitting mem range found for {:#010x}.", base));
+    }
+
+    fn read_ins(&mut self, base: usize) -> Option<u32> {
+        if let Some(base) = self.get_phys_addr(base as u32) {
+            let base = base as usize;
+            for mem in &self.mem.ranges {
+                if base >= mem.base && base < (mem.base + mem.mem.len()) {
+                    let offset = base - mem.base;
+
+                    let ins = (&mem.mem[offset..]).get_u32_le();
+                    return Some(ins);
+                }
+            }
+
+            self.die(&format!("No fitting mem range found for {:#010x}.", base));
+        } else {
+            self.pending_tval = base as u32;
+            self.pending_exception = Some(CAUSE_FETCH_PAGE_FAULT);
+            None
+        }
     }
 
     fn write_u32(&mut self, addr: u32, val: u32) {
-        let addr = addr as usize;
-        for mem in &mut self.mem.ranges {
-            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
-                let offset = addr - mem.base;
+        if let Some(addr) = self.get_phys_addr(addr) {
+            let addr = addr as usize;
+            for mem in &mut self.mem.ranges {
+                if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
+                    let offset = addr - mem.base;
 
-                (&mut mem.mem[offset..]).put_u32_le(val);
+                    (&mut mem.mem[offset..]).put_u32_le(val);
+                    return;
+                }
+            }
+
+            if addr >= CLINT_BASE && addr <= (CLINT_BASE + CLINT_SIZE - 4) {
+                let offset = addr - CLINT_BASE;
+                self.clint_write_u32(offset, val);
                 return;
             }
-        }
 
-        if addr >= CLINT_BASE && addr <= (CLINT_BASE + CLINT_SIZE - 4) {
-            let offset = addr - CLINT_BASE;
-            self.clint_write_u32(offset, val);
-            return;
-        }
+            if addr >= PLIC_BASE && addr <= (PLIC_BASE + PLIC_SIZE - 4) {
+                let offset = addr - PLIC_BASE;
+                self.plic_write_u32(offset, val);
+                return;
+            }
 
-        if addr >= PLIC_BASE && addr <= (PLIC_BASE + PLIC_SIZE - 4) {
-            let offset = addr - PLIC_BASE;
-            self.plic_write_u32(offset, val);
-            return;
+            panic!("No fitting mem range found for {:#010x}.", addr);
+        } else {
+            todo!("mmu exception");
         }
-
-        panic!("No fitting mem range found for {:#010x}.", addr);
     }
 
     fn read_u32(&mut self, addr: u32) -> u32 {
-        let addr = addr as usize;
-        for mem in &self.mem.ranges {
-            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
-                let offset = addr - mem.base;
+        if let Some(addr) = self.get_phys_addr(addr) {
+            let addr = addr as usize;
+            for mem in &self.mem.ranges {
+                if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
+                    let offset = addr - mem.base;
 
-                return (&mem.mem[offset..]).get_u32_le();
+                    return (&mem.mem[offset..]).get_u32_le();
+                }
             }
-        }
 
-        panic!("No fitting mem range found for {:#010x}.", addr);
+            panic!("No fitting mem range found for {:#010x}.", addr);
+        } else {
+            todo!("mmu exception");
+        }
     }
 
     fn write_u16(&mut self, addr: u32, val: u32) {
-        let addr = addr as usize;
-        for mem in &mut self.mem.ranges {
-            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 2) {
-                let offset = addr - mem.base;
+        if let Some(addr) = self.get_phys_addr(addr) {
+            let addr = addr as usize;
+            for mem in &mut self.mem.ranges {
+                if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
+                    let offset = addr - mem.base;
 
-                (&mut mem.mem[offset..]).put_u16_le(val as u16);
-                return;
+                    (&mut mem.mem[offset..]).put_u16_le(val as u16);
+                    return;
+                }
             }
-        }
 
-        panic!("No fitting mem range found for {:#010x}.", addr);
+            panic!("No fitting mem range found for {:#010x}.", addr);
+        } else {
+            todo!("mmu exception");
+        }
     }
 
     fn read_u16(&mut self, addr: u32) -> u32 {
-        let addr = addr as usize;
-        for mem in &self.mem.ranges {
-            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 2) {
-                let offset = addr - mem.base;
+        if let Some(addr) = self.get_phys_addr(addr) {
+            let addr = addr as usize;
+            for mem in &self.mem.ranges {
+                if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
+                    let offset = addr - mem.base;
 
-                return (&mem.mem[offset..]).get_u16_le() as u32;
+                    return (&mem.mem[offset..]).get_u16_le() as u32;
+                }
             }
-        }
 
-        panic!("No fitting mem range found for {:#010x}.", addr);
+            panic!("No fitting mem range found for {:#010x}.", addr);
+        } else {
+            todo!("mmu exception");
+        }
     }
 
     fn write_u8(&mut self, addr: u32, val: u32) {
-        let addr = addr as usize;
-        for mem in &mut self.mem.ranges {
-            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 1) {
-                let offset = addr - mem.base;
+        if let Some(addr) = self.get_phys_addr(addr) {
+            let addr = addr as usize;
+            for mem in &mut self.mem.ranges {
+                if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
+                    let offset = addr - mem.base;
 
-                mem.mem[offset] = val as u8;
-                return;
+                    mem.mem[offset] = val as u8;
+                    return;
+                }
             }
-        }
 
-        panic!("No fitting mem range found for {:#010x}.", addr);
+            panic!("No fitting mem range found for {:#010x}.", addr);
+        } else {
+            todo!("mmu exception");
+        }
     }
 
     fn read_u8(&mut self, addr: u32) -> u8 {
-        let addr = addr as usize;
-        for mem in &self.mem.ranges {
-            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 1) {
-                let offset = addr - mem.base;
+        if let Some(addr) = self.get_phys_addr(addr) {
+            let addr = addr as usize;
+            for mem in &self.mem.ranges {
+                if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
+                    let offset = addr - mem.base;
 
-                return mem.mem[offset];
+                    return mem.mem[offset];
+                }
             }
-        }
 
-        panic!("No fitting mem range found for {:#010x}.", addr);
+            panic!("No fitting mem range found for {:#010x}.", addr);
+        } else {
+            todo!("mmu exception");
+        }
     }
 
     fn die(&self, reason: &str) -> ! {
         println!("{:?}", self);
-        println!("callstack: {:#010x?}", self.callstack);
         panic!("{}", reason);
     }
 
@@ -253,7 +365,7 @@ impl RV32CPU {
                 self.scounteren = val;
             }
             0x180 => {
-                self.satp = val;
+                self.satp = val & 0x801fffff;
             }
             0x300 => {
                 self.mstatus = val;
@@ -293,12 +405,80 @@ impl RV32CPU {
         }
     }
 
+    fn do_mret(&mut self) {
+        let mpp = (self.mstatus >> 11) & 3;
+        let mpie = (self.mstatus >> 7) & 1;
+
+        self.mstatus &= !(1 << mpp);
+        self.mstatus |= mpie << mpp;
+
+        // set MPIE
+        self.mstatus |= 1 << 7;
+
+        self.mstatus &= !(3 << 11);
+        self.privl = mpp;
+        self.pc = self.mepc;
+    }
+
+    fn raise_exception(&mut self) {
+        let cause = self.pending_exception.unwrap();
+        let tval = self.pending_tval;
+
+        // println!("EXCEPTION");
+        // println!("cause: {:#010x} tval: {:#010x}", cause, tval);
+        // println!("{:?}", self);
+
+        let deleg;
+        if self.privl <= 2 {
+            if cause & CAUSE_INTERRUPT > 0 {
+                deleg = (self.mideleg & (1 << cause)) > 0;
+            } else {
+                deleg = (self.medeleg & (1 << cause)) > 0;
+            }
+        } else {
+            deleg = false;
+        }
+
+        if deleg {
+            self.scause = cause;
+            self.sepc = self.pc;
+            self.stval = tval;
+
+            // set spie
+            self.mstatus &= !(1 << 5);
+            self.mstatus |= (self.privl & 1) << 5;
+
+            // set spp
+            self.mstatus &= !(1 << 8);
+            self.mstatus |= self.privl << 8;
+
+            // unset sie
+            self.mstatus &= !(1 << 1);
+
+            self.privl = 1;
+            self.pc = self.stvec;
+        } else {
+            todo!("no deleg");
+        }
+    }
+
     fn run(&mut self) {
         //TODO: check interrupts
         //TODO: TLB (this probably needs a caching system, reading from memory
         // would need to search the ranges and then the tlb to translate an addr)
 
+        if self.pending_exception.is_some() {
+            self.raise_exception();
+            self.pending_exception = None;
+            return;
+        }
+
         let insn = self.read_ins(self.pc as usize);
+        if insn.is_none() {
+            return
+        }
+
+        let insn = insn.unwrap();
 
         let opcode = insn & 0x7f;
         let quadrant = insn & 3;
@@ -306,7 +486,10 @@ impl RV32CPU {
         let rs1 = (insn >> 15) & 0x1f;
         let rs2 = (insn >> 20) & 0x1f;
 
-        println!("pc={:#010x} insn={:08x}", self.pc, insn);
+        println!(
+            "pc={:#010x} insn={:08x} privl={}",
+            self.pc, insn, self.privl
+        );
 
         // println!("\tq={} op={:#04x}", quadrant, opcode);
 
@@ -384,7 +567,6 @@ impl RV32CPU {
                         let imm = sext!(imm as i32, 11);
 
                         self.regs[1] = self.pc + 2;
-                        self.callstack.push(self.pc as usize);
                         self.pc = self.pc.wrapping_add(imm as u32);
                     }
                     2 => {
@@ -556,10 +738,6 @@ impl RV32CPU {
                                     self.illegal_instruction();
                                 }
 
-                                if rd == 1 {
-                                    self.callstack.pop();
-                                }
-
                                 self.pc = self.regs[rd as usize] & 0xfffffffe;
                             } else {
                                 // c.mv
@@ -577,7 +755,6 @@ impl RV32CPU {
                                 } else {
                                     // c.jalr
                                     let val = self.pc + 2;
-                                    self.callstack.push(self.pc as usize);
                                     self.pc = self.regs[rd as usize] & 0xfffffffe;
                                     self.regs[1] = val;
                                 }
@@ -734,12 +911,12 @@ impl RV32CPU {
                                 match funct12 {
                                     0x302 => {
                                         // mret
-                                        self.pc = self.mepc;
+                                        self.do_mret();
                                     }
                                     0x120 => {
                                         self.pc += 4;
                                     }
-                                    _ => todo!("{:#x}ret", funct12)
+                                    _ => todo!("{:#x}ret", funct12),
                                 }
                             }
                             1 => {
@@ -769,7 +946,6 @@ impl RV32CPU {
                                 panic!("Unknown csr function {}, core: {:x?}", funct3, self)
                             }
                         }
-
                     }
                     0x67 => {
                         // jalr
@@ -779,9 +955,6 @@ impl RV32CPU {
 
                         if rd != 0 {
                             self.regs[rd as usize] = val;
-                            self.callstack.push((val - 4) as usize);
-                        } else {
-                            self.callstack.pop();
                         }
                     }
                     0x6f => {
@@ -795,7 +968,6 @@ impl RV32CPU {
 
                         if rd != 0 {
                             self.regs[rd as usize] = self.pc + 4;
-                            self.callstack.push(self.pc as usize);
                         }
 
                         let (target, _) = u32::overflowing_add(self.pc, imm as u32);
@@ -899,7 +1071,8 @@ impl RV32CPU {
                         let funct5 = insn >> 27;
                         let addr = self.regs[rs1 as usize];
 
-                        match funct3 { // data width
+                        match funct3 {
+                            // data width
                             2 => {
                                 // amox.w
                                 match funct5 {
@@ -911,10 +1084,10 @@ impl RV32CPU {
                                         self.write_u32(addr, res);
                                         self.regs[rd as usize] = val;
                                     }
-                                    _ => unimplemented!("amoX.w {}", funct5)
+                                    _ => unimplemented!("amoX.w {}", funct5),
                                 }
                             }
-                            _ => unimplemented!("amo width {}", funct5)
+                            _ => unimplemented!("amo width {}", funct5),
                         }
 
                         self.pc += 4;
@@ -964,10 +1137,26 @@ impl std::fmt::Debug for VMRAMRange {
     }
 }
 
+const PRIVL_NAMES: [&str; 4] = ["U", "S", "?", "M"];
+const SATP_NAMES: [&str; 2] = ["BASE", "Sv32"];
+
 impl std::fmt::Debug for RV32CPU {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "CORE:")?;
         writeln!(f, "pc: {:#010x}", self.pc)?;
+        if let Some(pc_phys) = self.get_phys_addr(self.pc) {
+            writeln!(f, "pc_phys: {:#010x}", pc_phys)?;
+        }
+        writeln!(f, "privl: {}", PRIVL_NAMES[self.privl as usize])?;
+        writeln!(f, "mstatus: {:#010x}", self.mstatus)?;
+        writeln!(f, "mie: {:#010x} mip: {:#010x}", self.mie, self.mip)?;
+        writeln!(f, "mtvec: {:#010x} stvec: {:#010x}", self.mtvec, self.stvec)?;
+        writeln!(
+            f,
+            "satp: {} {:#010x}",
+            SATP_NAMES[(self.satp >> 31) as usize],
+            self.satp << 12
+        )?;
 
         for n in 0..32 {
             writeln!(f, "r{:02}: {:#010x}", n, self.regs[n])?;
@@ -1063,10 +1252,10 @@ fn main() {
     let cfg = VMConfig {
         machine: VMMachineSpec::RV32,
         memory_mb: 128,
-        bios_path: String::from("./configs/rv32-zephyr/zephyr.bin"),
-        kernel_path: String::from("/dev/null"),
-        dtb_path: String::from("/dev/null"),
-        drive: String::from("/dev/null"),
+        bios_path: String::from("./configs/rv32-linux/bbl32.bin"),
+        kernel_path: String::from("./configs/rv32-linux/kernel-riscv32.bin"),
+        dtb_path: String::from("./configs/rv32-linux/riscvemu.dtb"),
+        drive: String::from("./configs/rv32-linux/root-riscv32.bin"),
     };
 
     let mut machine = VMMachine::from_config(&cfg);
