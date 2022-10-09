@@ -21,36 +21,6 @@ struct VMConfig {
     drive: String,
 }
 
-trait MemMapDevice {
-    fn read(&mut self, cpu: &mut RV32CPU, offset: usize, size: usize) -> u32;
-    fn write(&mut self, cpu: &mut RV32CPU, offset: usize, val: u32, size: usize);
-    fn size(&self) -> usize;
-}
-
-#[derive(Debug)]
-struct CLINT {
-}
-
-impl CLINT {
-    fn new() -> Self {
-        Self {}
-    }
-}
-
-impl MemMapDevice for CLINT {
-    fn read(&mut self, cpu: &mut RV32CPU, offset: usize, size: usize) -> u32 {
-        0
-    }
-
-    fn write(&mut self, cpu: &mut RV32CPU, offset: usize, val: u32, size: usize) {
-
-    }
-
-    fn size(&self) -> usize {
-        0xc0000
-    }
-}
-
 struct RV32CPU {
     mem: VMMemory,
     pc: u32,
@@ -99,6 +69,72 @@ impl RV32CPU {
 
             callstack: Vec::new(),
         }
+    }
+
+    fn read_ins(&self, base: usize) -> u32 {
+        for mem in &self.mem.ranges {
+            if base >= mem.base && base < (mem.base + mem.mem.len()) {
+                let offset = base - mem.base;
+
+                return (&mem.mem[offset..]).get_u32_le();
+            }
+        }
+
+        panic!("No fitting mem range found for {:#010x}.", base);
+    }
+
+    fn write_u32(&mut self, addr: u32, val: u32) {
+        let addr = addr as usize;
+        for mem in &mut self.mem.ranges {
+            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
+                let offset = addr - mem.base;
+
+                (&mut mem.mem[offset..]).put_u32_le(val);
+                return;
+            }
+        }
+
+        panic!("No fitting mem range found for {:#010x}.", addr);
+    }
+
+    fn read_u32(&mut self, addr: u32) -> u32 {
+        let addr = addr as usize;
+        for mem in &self.mem.ranges {
+            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
+                let offset = addr - mem.base;
+
+                return (&mem.mem[offset..]).get_u32_le();
+            }
+        }
+
+        panic!("No fitting mem range found for {:#010x}.", addr);
+    }
+
+    fn write_u8(&mut self, addr: u32, val: u32) {
+        let addr = addr as usize;
+        for mem in &mut self.mem.ranges {
+            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 1) {
+                let offset = addr - mem.base;
+
+                mem.mem[offset] = val as u8;
+                return;
+            }
+        }
+
+        panic!("No fitting mem range found for {:#010x}.", addr);
+    }
+
+    fn read_u8(&mut self, addr: u32) -> u8 {
+        let addr = addr as usize;
+        for mem in &self.mem.ranges {
+            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 1) {
+                let offset = addr - mem.base;
+
+                return mem.mem[offset];
+            }
+        }
+
+        panic!("No fitting mem range found for {:#010x}.", addr);
     }
 
     fn die(&self, reason: &str) -> ! {
@@ -162,7 +198,7 @@ impl RV32CPU {
         //TODO: TLB (this probably needs a caching system, reading from memory
         // would need to search the ranges and then the tlb to translate an addr)
 
-        let insn = self.mem.read_ins(self.pc as usize);
+        let insn = self.read_ins(self.pc as usize);
 
         let opcode = insn & 0x7f;
         let quadrant = insn & 3;
@@ -203,7 +239,7 @@ impl RV32CPU {
                         let rs1 = (insn >> 7) & 7 | 8;
                         let addr = self.regs[rs1 as usize] + imm;
 
-                        let val = self.mem.read_u32(addr);
+                        let val = self.read_u32(addr);
                         self.regs[rd as usize] = val;
                         self.pc += 2;
                     }
@@ -214,7 +250,7 @@ impl RV32CPU {
                         let rs1 = (insn >> 7) & 7 | 8;
                         let addr = self.regs[rs1 as usize].wrapping_add(imm);
                         let val = self.regs[rd as usize];
-                        self.mem.write_u32(addr, val);
+                        self.write_u32(addr, val);
                         self.pc += 2;
                     }
                     _ => unimplemented!("compact0 function {}", funct3),
@@ -405,7 +441,7 @@ impl RV32CPU {
                         // c.lwsp
                         let imm = ((insn >> 7) & 0x20) | ((insn << 4) & 0xc0) | (rs2 & 0x1c);
                         let addr = self.regs[2] + imm;
-                        let val = self.mem.read_u32(addr);
+                        let val = self.read_u32(addr);
                         if rd != 0 {
                             self.regs[rd as usize] = val;
                         }
@@ -459,7 +495,7 @@ impl RV32CPU {
                         // c.swsp
                         let imm = ((insn >> 7) & 0x3c) | ((insn >> 1) & 0xc0);
                         let addr = self.regs[2] + imm;
-                        self.mem.write_u32(addr, self.regs[rs2 as usize]);
+                        self.write_u32(addr, self.regs[rs2 as usize]);
 
                         self.pc += 2;
                     }
@@ -478,11 +514,11 @@ impl RV32CPU {
                         match funct3 {
                             2 => {
                                 // lw
-                                val = self.mem.read_u32(addr);
+                                val = self.read_u32(addr);
                             }
                             4 => {
                                 // lbu
-                                val = self.mem.read_u8(addr) as u32;
+                                val = self.read_u8(addr) as u32;
                             }
                             _ => unimplemented!("load {}", funct3),
                         }
@@ -502,11 +538,11 @@ impl RV32CPU {
                         match funct3 {
                             0 => {
                                 // sb
-                                self.mem.write_u8(addr, self.regs[rs2 as usize]);
+                                self.write_u8(addr, self.regs[rs2 as usize]);
                             }
                             2 => {
                                 // sw
-                                self.mem.write_u32(addr, self.regs[rs2 as usize]);
+                                self.write_u32(addr, self.regs[rs2 as usize]);
                             }
                             _ => unimplemented!("store {}", funct3),
                         }
@@ -747,13 +783,6 @@ impl RV32CPU {
 struct VMMachine {
     cpu: RV32CPU,
     ram_size: usize,
-
-    // HTIF
-    // TODO: Abstract
-    htif_tohost: u64,
-    htif_fromhost: u64,
-    // TODO: PLIC
-    // TODO: VirtIO
 }
 
 #[derive(Clone)]
@@ -795,44 +824,21 @@ impl std::fmt::Debug for RV32CPU {
     }
 }
 
-struct DeviceRange {
-    base: usize,
-    len: usize,
-    device: Box<dyn MemMapDevice>,
-}
-
-impl DeviceRange {
-    fn new(base: usize, dev: Box<dyn MemMapDevice>) -> Self {
-        Self {
-            base,
-            len: dev.size(),
-            device: dev,
-        }
-    }
-}
-
 struct VMMemory {
     //TODO: abstract, so not only vec-ram can be used
     ranges: Vec<VMRAMRange>,
-    devices: Vec<DeviceRange>,
 }
 
 impl VMMemory {
     fn new() -> Self {
         Self {
             ranges: Vec::new(),
-            devices: Vec::new(),
         }
     }
 
     fn register_ram(&mut self, base: usize, size: usize) {
         let range = VMRAMRange::new(base, size);
         self.ranges.push(range);
-    }
-
-    fn register_device(&mut self, base: usize, dev: Box<dyn MemMapDevice>) {
-        let range = DeviceRange::new(base, dev);
-        self.devices.push(range);
     }
 
     fn load_from_slice(&mut self, base: usize, data: &[u8]) -> usize {
@@ -855,71 +861,6 @@ impl VMMemory {
         self.load_from_slice(base, &data)
     }
 
-    fn read_ins(&self, base: usize) -> u32 {
-        for mem in &self.ranges {
-            if base >= mem.base && base < (mem.base + mem.mem.len()) {
-                let offset = base - mem.base;
-
-                return (&mem.mem[offset..]).get_u32_le();
-            }
-        }
-
-        panic!("No fitting mem range found for {:#010x}.", base);
-    }
-
-    fn write_u32(&mut self, addr: u32, val: u32) {
-        let addr = addr as usize;
-        for mem in &mut self.ranges {
-            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
-                let offset = addr - mem.base;
-
-                (&mut mem.mem[offset..]).put_u32_le(val);
-                return;
-            }
-        }
-
-        panic!("No fitting mem range found for {:#010x}.", addr);
-    }
-
-    fn read_u32(&mut self, addr: u32) -> u32 {
-        let addr = addr as usize;
-        for mem in &self.ranges {
-            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
-                let offset = addr - mem.base;
-
-                return (&mem.mem[offset..]).get_u32_le();
-            }
-        }
-
-        panic!("No fitting mem range found for {:#010x}.", addr);
-    }
-
-    fn write_u8(&mut self, addr: u32, val: u32) {
-        let addr = addr as usize;
-        for mem in &mut self.ranges {
-            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 1) {
-                let offset = addr - mem.base;
-
-                mem.mem[offset] = val as u8;
-                return;
-            }
-        }
-
-        panic!("No fitting mem range found for {:#010x}.", addr);
-    }
-
-    fn read_u8(&mut self, addr: u32) -> u8 {
-        let addr = addr as usize;
-        for mem in &self.ranges {
-            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 1) {
-                let offset = addr - mem.base;
-
-                return mem.mem[offset];
-            }
-        }
-
-        panic!("No fitting mem range found for {:#010x}.", addr);
-    }
 }
 
 impl VMMachine {
@@ -931,7 +872,6 @@ impl VMMachine {
 
         cpu.mem.register_ram(0, 0x10000);
         cpu.mem.register_ram(RAM_BASE, ram_size);
-        cpu.mem.register_device(0x2000000, Box::new(CLINT::new()));
 
         let bl_len = cpu.mem.load_from_file(RAM_BASE, &cfg.bios_path);
         let kernel_align = 4 << 20;
@@ -964,9 +904,6 @@ impl VMMachine {
         Self {
             cpu,
             ram_size,
-
-            htif_tohost: 0,
-            htif_fromhost: 0,
         }
     }
 
