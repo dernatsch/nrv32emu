@@ -141,6 +141,33 @@ impl RV32CPU {
         panic!("No fitting mem range found for {:#010x}.", addr);
     }
 
+    fn write_u16(&mut self, addr: u32, val: u32) {
+        let addr = addr as usize;
+        for mem in &mut self.mem.ranges {
+            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 2) {
+                let offset = addr - mem.base;
+
+                (&mut mem.mem[offset..]).put_u16_le(val as u16);
+                return;
+            }
+        }
+
+        panic!("No fitting mem range found for {:#010x}.", addr);
+    }
+
+    fn read_u16(&mut self, addr: u32) -> u32 {
+        let addr = addr as usize;
+        for mem in &self.mem.ranges {
+            if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 2) {
+                let offset = addr - mem.base;
+
+                return (&mem.mem[offset..]).get_u16_le() as u32;
+            }
+        }
+
+        panic!("No fitting mem range found for {:#010x}.", addr);
+    }
+
     fn write_u8(&mut self, addr: u32, val: u32) {
         let addr = addr as usize;
         for mem in &mut self.mem.ranges {
@@ -601,6 +628,10 @@ impl RV32CPU {
                             0 => {
                                 // sb
                                 self.write_u8(addr, self.regs[rs2 as usize]);
+                            }
+                            1 => {
+                                // sh
+                                self.write_u16(addr, self.regs[rs2 as usize]);
                             }
                             2 => {
                                 // sw
