@@ -38,8 +38,16 @@ struct RV32CPU {
     medeleg: u32,
     satp: u32,
 
+    pmpaddr: [u32; 16],
+    pmpcfg: [u32; 4],
+
     callstack: Vec<usize>,
 }
+
+const CLINT_BASE: usize = 0x02000000;
+const CLINT_SIZE: usize = 0x000c0000;
+const PLIC_BASE: usize = 0x40100000;
+const PLIC_SIZE: usize = 0x00400000;
 
 impl RV32CPU {
     fn new() -> Self {
@@ -64,12 +72,17 @@ impl RV32CPU {
             mip: 0,
             mideleg: 0,
             medeleg: 0,
-
             satp: 0,
+            pmpcfg: [0u32; 4],
+            pmpaddr: [0u32; 16],
 
             callstack: Vec::new(),
         }
     }
+
+    fn clint_write_u32(&mut self, offset: usize, val: u32) {}
+
+    fn plic_write_u32(&mut self, offset: usize, val: u32) {}
 
     fn read_ins(&self, base: usize) -> u32 {
         for mem in &self.mem.ranges {
@@ -92,6 +105,18 @@ impl RV32CPU {
                 (&mut mem.mem[offset..]).put_u32_le(val);
                 return;
             }
+        }
+
+        if addr >= CLINT_BASE && addr <= (CLINT_BASE + CLINT_SIZE - 4) {
+            let offset = addr - CLINT_BASE;
+            self.clint_write_u32(offset, val);
+            return;
+        }
+
+        if addr >= PLIC_BASE && addr <= (PLIC_BASE + PLIC_SIZE - 4) {
+            let offset = addr - PLIC_BASE;
+            self.plic_write_u32(offset, val);
+            return;
         }
 
         panic!("No fitting mem range found for {:#010x}.", addr);
@@ -158,7 +183,12 @@ impl RV32CPU {
             0x305 => self.mtvec,
             0x306 => self.mcounteren,
             0x340 => self.mscratch,
+            0x344 => self.mip,
             0xf14 => self.mhartid,
+            0x3a0 | 0x3a1 | 0x3a2 | 0x3a3 => self.pmpcfg[(csr & 0x0f) as usize],
+
+            0x3b0 | 0x3b1 | 0x3b2 | 0x3b3 | 0x3b4 | 0x3b5 | 0x3b6 | 0x3b7 | 0x3b8 | 0x3b9
+            | 0x3ba | 0x3bb | 0x3bc | 0x3bd | 0x3be | 0x3bf => self.pmpaddr[(csr & 0x0f) as usize],
             _ => unimplemented!("unimplemented csr read value {csr:#x}"),
         }
     }
@@ -188,6 +218,16 @@ impl RV32CPU {
             }
             0x340 => {
                 self.mscratch = val;
+            }
+            0x344 => {
+                self.mip = val;
+            }
+            0x3a0 | 0x3a1 | 0x3a2 | 0x3a3 => {
+                self.pmpcfg[(csr & 0x0f) as usize] = val;
+            }
+            0x3b0 | 0x3b1 | 0x3b2 | 0x3b3 | 0x3b4 | 0x3b5 | 0x3b6 | 0x3b7 | 0x3b8 | 0x3b9
+            | 0x3ba | 0x3bb | 0x3bc | 0x3bd | 0x3be | 0x3bf => {
+                self.pmpaddr[(csr & 0x0f) as usize] = val;
             }
             _ => unimplemented!("unimplemented csr write value {csr:#x}"),
         }
@@ -261,15 +301,15 @@ impl RV32CPU {
 
                 match funct3 {
                     0 => {
-                        // c.addi
+                        // c.addi else c.nop
                         if rd != 0 {
                             let imm = ((insn >> 7) & 0x20) | ((insn >> 2) & 0x1f);
                             let imm = sext!(imm as i32, 5);
 
                             self.regs[rd as usize] =
                                 self.regs[rd as usize].wrapping_add(imm as u32);
-                            self.pc += 2;
                         }
+                        self.pc += 2;
                     }
                     1 => {
                         // c.jal
@@ -526,6 +566,10 @@ impl RV32CPU {
                         if rd != 0 {
                             self.regs[rd as usize] = val;
                         }
+                        self.pc += 4;
+                    }
+                    0x0f => {
+                        // fence
                         self.pc += 4;
                     }
                     0x23 => {
@@ -831,9 +875,7 @@ struct VMMemory {
 
 impl VMMemory {
     fn new() -> Self {
-        Self {
-            ranges: Vec::new(),
-        }
+        Self { ranges: Vec::new() }
     }
 
     fn register_ram(&mut self, base: usize, size: usize) {
@@ -860,7 +902,6 @@ impl VMMemory {
         let data = std::fs::read(path).unwrap();
         self.load_from_slice(base, &data)
     }
-
 }
 
 impl VMMachine {
@@ -901,10 +942,7 @@ impl VMMachine {
 
         cpu.mem.load_from_slice(0x1000, &trampoline);
 
-        Self {
-            cpu,
-            ram_size,
-        }
+        Self { cpu, ram_size }
     }
 
     fn run(&mut self) {
