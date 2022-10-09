@@ -30,13 +30,16 @@ struct RV32CPU {
     mtvec: u32,
     mscratch: u32,
     misa: u32,
+    mstatus: u32,
     mcounteren: u32,
     scounteren: u32,
     mie: u32,
     mip: u32,
+    mepc: u32,
     mideleg: u32,
     medeleg: u32,
     satp: u32,
+    sstatus: u32,
 
     pmpaddr: [u32; 16],
     pmpcfg: [u32; 4],
@@ -58,6 +61,7 @@ impl RV32CPU {
             mhartid: 0,
             mtvec: 0,
             mscratch: 0,
+            mstatus: 0,
             misa: (1<<18) | // S
                 (1<<20) |   // U
                 (1<<8) |    // I
@@ -68,11 +72,13 @@ impl RV32CPU {
             scounteren: 0,
             mcounteren: 0,
 
+            mepc: 0,
             mie: 0,
             mip: 0,
             mideleg: 0,
             medeleg: 0,
             satp: 0,
+            sstatus: 0,
             pmpcfg: [0u32; 4],
             pmpaddr: [0u32; 16],
 
@@ -174,8 +180,10 @@ impl RV32CPU {
 
     fn read_csr(&self, csr: u32) -> u32 {
         match csr {
+            0x100 => self.sstatus,
             0x106 => self.scounteren,
             0x180 => self.satp,
+            0x300 => self.mstatus,
             0x301 => self.misa,
             0x302 => self.medeleg,
             0x303 => self.mideleg,
@@ -183,6 +191,7 @@ impl RV32CPU {
             0x305 => self.mtvec,
             0x306 => self.mcounteren,
             0x340 => self.mscratch,
+            0x341 => self.mepc,
             0x344 => self.mip,
             0xf14 => self.mhartid,
             0x3a0 | 0x3a1 | 0x3a2 | 0x3a3 => self.pmpcfg[(csr & 0x0f) as usize],
@@ -195,11 +204,17 @@ impl RV32CPU {
 
     fn write_csr(&mut self, csr: u32, val: u32) {
         match csr {
+            0x100 => {
+                self.sstatus = val;
+            }
             0x106 => {
                 self.scounteren = val;
             }
             0x180 => {
                 self.satp = val;
+            }
+            0x300 => {
+                self.mstatus = val;
             }
             0x302 => {
                 self.medeleg = val;
@@ -218,6 +233,9 @@ impl RV32CPU {
             }
             0x340 => {
                 self.mscratch = val;
+            }
+            0x341 => {
+                self.mepc = val;
             }
             0x344 => {
                 self.mip = val;
@@ -632,6 +650,10 @@ impl RV32CPU {
                                     val = self.regs[rs1 as usize] >> imm;
                                 }
                             }
+                            6 => {
+                                // ori
+                                val = self.regs[rs1 as usize] | imm;
+                            }
                             7 => {
                                 // andi
                                 val = self.regs[rs1 as usize] & imm;
@@ -660,6 +682,17 @@ impl RV32CPU {
                         }
 
                         match funct3 & 3 {
+                            0 => {
+                                // xret
+                                let funct12 = insn >> 20;
+                                match funct12 {
+                                    0x302 => {
+                                        // mret
+                                        self.pc = self.mepc;
+                                    }
+                                    _ => todo!("{:#x}ret", funct12)
+                                }
+                            }
                             1 => {
                                 // csrrw
                                 let val2 = self.read_csr(imm);
@@ -810,6 +843,10 @@ impl RV32CPU {
                         }
                         self.pc += 4;
                     }
+                    0x2f => {
+                        // amoadd.w
+
+                    }
                     0x93 => {
                         panic!();
                     }
@@ -948,18 +985,16 @@ impl VMMachine {
     fn run(&mut self) {
         self.cpu.run();
     }
-
-    fn end(&mut self) {}
 }
 
 fn main() {
     let cfg = VMConfig {
         machine: VMMachineSpec::RV32,
         memory_mb: 128,
-        bios_path: String::from("./configs/rv32-linux/bbl32.bin"),
-        kernel_path: String::from("./configs/rv32-linux/kernel-riscv32.bin"),
-        dtb_path: String::from("./configs/rv32-linux/riscvemu.dtb"),
-        drive: String::from("./configs/rv32-linux/root-riscv32.bin"),
+        bios_path: String::from("./configs/rv32-zephyr/zephyr.bin"),
+        kernel_path: String::from("/dev/null"),
+        dtb_path: String::from("/dev/null"),
+        drive: String::from("/dev/null"),
     };
 
     let mut machine = VMMachine::from_config(&cfg);
