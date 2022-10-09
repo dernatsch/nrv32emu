@@ -32,14 +32,17 @@ struct RV32CPU {
     misa: u32,
     mstatus: u32,
     mcounteren: u32,
-    scounteren: u32,
     mie: u32,
     mip: u32,
     mepc: u32,
     mideleg: u32,
     medeleg: u32,
+
+    scounteren: u32,
     satp: u32,
     sstatus: u32,
+    stvec: u32,
+    sie: u32,
 
     pmpaddr: [u32; 16],
     pmpcfg: [u32; 4],
@@ -69,7 +72,6 @@ impl RV32CPU {
                 (1<<0) |    // A
                 (1<<2), // C
 
-            scounteren: 0,
             mcounteren: 0,
 
             mepc: 0,
@@ -77,8 +79,13 @@ impl RV32CPU {
             mip: 0,
             mideleg: 0,
             medeleg: 0,
+
+            scounteren: 0,
             satp: 0,
             sstatus: 0,
+            stvec: 0,
+            sie: 0,
+
             pmpcfg: [0u32; 4],
             pmpaddr: [0u32; 16],
 
@@ -208,6 +215,8 @@ impl RV32CPU {
     fn read_csr(&self, csr: u32) -> u32 {
         match csr {
             0x100 => self.sstatus,
+            0x104 => self.sie,
+            0x105 => self.stvec,
             0x106 => self.scounteren,
             0x180 => self.satp,
             0x300 => self.mstatus,
@@ -233,6 +242,12 @@ impl RV32CPU {
         match csr {
             0x100 => {
                 self.sstatus = val;
+            }
+            0x104 => {
+                self.sie = val;
+            }
+            0x105 => {
+                self.stvec = val;
             }
             0x106 => {
                 self.scounteren = val;
@@ -721,6 +736,9 @@ impl RV32CPU {
                                         // mret
                                         self.pc = self.mepc;
                                     }
+                                    0x120 => {
+                                        self.pc += 4;
+                                    }
                                     _ => todo!("{:#x}ret", funct12)
                                 }
                             }
@@ -732,6 +750,7 @@ impl RV32CPU {
                                 if rd != 0 {
                                     self.regs[rd as usize] = val2;
                                 }
+                                self.pc += 4;
                             }
                             2 | 3 => {
                                 // csrrs, csrrc
@@ -744,13 +763,13 @@ impl RV32CPU {
                                 if rd != 0 {
                                     self.regs[rd as usize] = val2;
                                 }
+                                self.pc += 4;
                             }
                             _ => {
                                 panic!("Unknown csr function {}, core: {:x?}", funct3, self)
                             }
                         }
 
-                        self.pc += 4;
                     }
                     0x67 => {
                         // jalr
@@ -875,8 +894,30 @@ impl RV32CPU {
                         self.pc += 4;
                     }
                     0x2f => {
-                        // amoadd.w
+                        // amo
+                        let funct3 = (insn >> 12) & 7;
+                        let funct5 = insn >> 27;
+                        let addr = self.regs[rs1 as usize];
 
+                        match funct3 { // data width
+                            2 => {
+                                // amox.w
+                                match funct5 {
+                                    0 => {
+                                        // amoadd.w
+                                        let val = self.read_u32(addr);
+                                        let val2 = self.regs[rs2 as usize];
+                                        let res = val.wrapping_add(val2);
+                                        self.write_u32(addr, res);
+                                        self.regs[rd as usize] = val;
+                                    }
+                                    _ => unimplemented!("amoX.w {}", funct5)
+                                }
+                            }
+                            _ => unimplemented!("amo width {}", funct5)
+                        }
+
+                        self.pc += 4;
                     }
                     0x93 => {
                         panic!();
