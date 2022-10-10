@@ -1,3 +1,26 @@
+/*
+ * nrv32emu
+ * Copyright © 2022 Jannik Birk
+
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
 use bytes::{Buf, BufMut};
 
 macro_rules! sext {
@@ -62,8 +85,6 @@ struct RV32CPU {
     timecmp: u64,
 
     load_res: u32,
-
-    counter: usize,
 }
 
 const CLINT_BASE: usize = 0x02000000;
@@ -128,8 +149,6 @@ impl RV32CPU {
             timecmp: 0xffffffff,
 
             load_res: 0,
-
-            counter: 0,
         }
     }
 
@@ -139,8 +158,6 @@ impl RV32CPU {
     }
 
     fn clint_write_u32(&mut self, offset: usize, val: u32) {
-        // println!("clint@{:#010x} <- {:#010x}", offset, val);
-        // println!("pc: {:#010x}", self.pc);
         match offset {
             0x4000 => {
                 self.timecmp = (self.timecmp & !0xffffffff) | val as u64;
@@ -155,7 +172,6 @@ impl RV32CPU {
     }
 
     fn clint_read_u32(&mut self, offset: usize) -> u32 {
-        //println!("clint read @ {:#010x}", offset);
         match offset {
             0xbff8 => Self::rtc_time() as u32,
             0xbffc => (Self::rtc_time() >> 32) as u32,
@@ -165,16 +181,14 @@ impl RV32CPU {
         }
     }
 
-    fn plic_write_u32(&mut self, offset: usize, val: u32) {
-        // println!("plint@{:#010x} <- {:#010x}", offset, val);
+    fn plic_write_u32(&mut self, _offset: usize, _val: u32) {
     }
 
-    fn plic_read_u32(&mut self, offset: usize) -> u32 {
+    fn plic_read_u32(&mut self, _offset: usize) -> u32 {
         0
     }
 
     fn uart_write_u8(&mut self, offset: usize, val: u32) {
-        //println!("uart@{:010x} <- {:#04x}", offset, val);
         match offset {
             0 => {
                 // transmit buffer
@@ -185,7 +199,6 @@ impl RV32CPU {
     }
 
     fn uart_read_u8(&mut self, offset: usize) -> u8 {
-        //println!("uart@{:010x} -> {:#04x}", offset, 0);
         match offset {
             0x05 => {
                 // line status register
@@ -546,9 +559,6 @@ impl RV32CPU {
         let cause = self.pending_exception.unwrap();
         let tval = self.pending_tval;
 
-        // println!("EXCEPTION");
-        // println!("cause: {:#010x} tval: {:#010x}", cause, tval);
-        // println!("{:?}", self);
 
         let deleg;
         if self.privl <= 2 {
@@ -1148,11 +1158,6 @@ impl RV32CPU {
                                     0x105 => {
                                         // wfi
                                         if self.mip & self.mie == 0 {
-                                            // println!(
-                                            //     "wfi @ {:#010x}",
-                                            //     self.get_phys_addr(self.pc).unwrap()
-                                            // );
-                                            // no interrupts, go to sleep
                                             self.power_down = true;
                                             self.pc += 4;
                                             return;
@@ -1457,7 +1462,6 @@ impl RV32CPU {
 #[derive(Debug)]
 struct VMMachine {
     cpu: RV32CPU,
-    ram_size: usize,
 }
 
 #[derive(Clone)]
@@ -1589,7 +1593,7 @@ impl VMMachine {
 
         cpu.mem.load_from_slice(0x1000, &trampoline);
 
-        Self { cpu, ram_size }
+        Self { cpu }
     }
 
     fn run(&mut self) {
