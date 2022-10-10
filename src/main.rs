@@ -140,6 +140,7 @@ impl RV32CPU {
 
     fn clint_write_u32(&mut self, offset: usize, val: u32) {
         // println!("clint@{:#010x} <- {:#010x}", offset, val);
+        // println!("pc: {:#010x}", self.pc);
         match offset {
             0x4000 => {
                 self.timecmp = (self.timecmp & !0xffffffff) | val as u64;
@@ -154,6 +155,7 @@ impl RV32CPU {
     }
 
     fn clint_read_u32(&mut self, offset: usize) -> u32 {
+        //println!("clint read @ {:#010x}", offset);
         match offset {
             0xbff8 => Self::rtc_time() as u32,
             0xbffc => (Self::rtc_time() >> 32) as u32,
@@ -336,12 +338,12 @@ impl RV32CPU {
 
             if addr >= CLINT_BASE && addr <= (CLINT_BASE + CLINT_SIZE - 4) {
                 let offset = addr - CLINT_BASE;
-                return Some(self.clint_read_u32(addr));
+                return Some(self.clint_read_u32(offset));
             }
 
             if addr >= PLIC_BASE && addr <= (PLIC_BASE + PLIC_SIZE - 4) {
                 let offset = addr - PLIC_BASE;
-                return Some(self.plic_read_u32(addr));
+                return Some(self.plic_read_u32(offset));
             }
 
             panic!("No fitting mem range found for {:#010x}.", addr);
@@ -636,8 +638,6 @@ impl RV32CPU {
         if mask != 0 {
             let irq_no = mask.trailing_zeros();
             self.pending_exception = Some(irq_no | 0x80000000);
-            self.pending_tval = 0;
-            self.raise_exception();
             true
         } else {
             false
@@ -1148,10 +1148,10 @@ impl RV32CPU {
                                     0x105 => {
                                         // wfi
                                         if self.mip & self.mie == 0 {
-                                            println!(
-                                                "wfi @ {:#010x}",
-                                                self.get_phys_addr(self.pc).unwrap()
-                                            );
+                                            // println!(
+                                            //     "wfi @ {:#010x}",
+                                            //     self.get_phys_addr(self.pc).unwrap()
+                                            // );
                                             // no interrupts, go to sleep
                                             self.power_down = true;
                                             self.pc += 4;
@@ -1612,8 +1612,23 @@ fn main() {
     loop {
         machine.run();
 
-        if RV32CPU::rtc_time() > machine.cpu.timecmp && (machine.cpu.mip & 0x80 == 0) {
-            // machine.cpu.set_mip(0x80); // MTIP
+        const MAX_SLEEP_TIME: u64 = 10000000; // [ns] = 10 ms
+
+        let mut sleeptime = 0;
+        let now = RV32CPU::rtc_time();
+        if machine.cpu.mip & 0x80 == 0 {
+            if now > machine.cpu.timecmp {
+                machine.cpu.set_mip(0x80); // MIP
+            } else {
+                if machine.cpu.power_down {
+                    sleeptime = machine.cpu.timecmp - now;
+                    sleeptime = sleeptime.max(MAX_SLEEP_TIME);
+                }
+            }
+        }
+
+        if sleeptime > 0 {
+            std::thread::sleep(std::time::Duration::from_nanos(sleeptime));
         }
     }
 }
