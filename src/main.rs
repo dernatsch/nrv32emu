@@ -39,6 +39,8 @@ struct RV32CPU {
     mepc: u32,
     mideleg: u32,
     medeleg: u32,
+    mcause: u32,
+    mtval: u32,
 
     scounteren: u32,
     satp: u32,
@@ -54,15 +56,27 @@ struct RV32CPU {
 
     pending_exception: Option<u32>,
     pending_tval: u32,
+
+    power_down: bool,
+
+    timecmp: u64,
+
+    load_res: u32,
+
+    counter: usize,
 }
 
 const CLINT_BASE: usize = 0x02000000;
-const CLINT_SIZE: usize = 0x000c0000;
-const PLIC_BASE: usize = 0x40100000;
-const PLIC_SIZE: usize = 0x00400000;
+const CLINT_SIZE: usize = 0x0010000;
+const PLIC_BASE: usize = 0x0c000000;
+const PLIC_SIZE: usize = 0x04000000;
+const UART_BASE: usize = 0x10000000;
+const UART_SIZE: usize = 0x00000100;
 
 const CAUSE_FETCH_PAGE_FAULT: u32 = 0x0c;
+const CAUSE_LOAD_PAGE_FAULT: u32 = 0x0d;
 const CAUSE_INTERRUPT: u32 = 0x80;
+const CAUSE_BREAKPOINT: u32 = 0x03;
 
 impl RV32CPU {
     fn new() -> Self {
@@ -91,6 +105,8 @@ impl RV32CPU {
             mip: 0,
             mideleg: 0,
             medeleg: 0,
+            mcause: 0,
+            mtval: 0,
 
             scounteren: 0,
             satp: 0,
@@ -106,12 +122,89 @@ impl RV32CPU {
 
             pending_exception: None,
             pending_tval: 0,
+
+            power_down: false,
+
+            timecmp: 0xffffffff,
+
+            load_res: 0,
+
+            counter: 0,
         }
     }
 
-    fn clint_write_u32(&mut self, offset: usize, val: u32) {}
+    fn rtc_time() -> u64 {
+        let ts = std::time::SystemTime::UNIX_EPOCH.elapsed().unwrap();
+        ts.as_nanos() as u64
+    }
 
-    fn plic_write_u32(&mut self, offset: usize, val: u32) {}
+    fn clint_write_u32(&mut self, offset: usize, val: u32) {
+        println!("clint@{:#010x} <- {:#010x}", offset, val);
+        match offset {
+            0x4000 => {
+                self.timecmp = (self.timecmp & !0xffffffff) | val as u64;
+                self.unset_mip(0x80);
+            }
+            0x4004 => {
+                self.timecmp = (self.timecmp & 0xffffffff) | ((val as u64) << 32);
+                self.unset_mip(0x80);
+            }
+            _ => {}
+        }
+    }
+
+    fn clint_read_u32(&mut self, offset: usize) -> u32 {
+        match offset {
+            0xbff8 => Self::rtc_time() as u32,
+            0xbffc => (Self::rtc_time() >> 32) as u32,
+            0x4000 => self.timecmp as u32,
+            0x4004 => (self.timecmp >> 32) as u32,
+            _ => 0,
+        }
+    }
+
+    fn plic_write_u32(&mut self, offset: usize, val: u32) {
+        // println!("plint@{:#010x} <- {:#010x}", offset, val);
+    }
+
+    fn plic_read_u32(&mut self, offset: usize) -> u32 {
+        0
+    }
+
+    fn uart_write_u8(&mut self, offset: usize, val: u32) {
+        //println!("uart@{:010x} <- {:#04x}", offset, val);
+        match offset {
+            0 => {
+                // transmit buffer
+                print!("{}", (val as u8) as char);
+            }
+            _ => {}
+        }
+    }
+
+    fn uart_read_u8(&mut self, offset: usize) -> u8 {
+        //println!("uart@{:010x} -> {:#04x}", offset, 0);
+        match offset {
+            0x05 => {
+                // line status register
+                // return fifos empty, no errors
+                0x60
+            }
+            _ => 0,
+        }
+    }
+
+    fn set_mip(&mut self, mask: u32) {
+        self.mip |= mask;
+
+        if self.power_down && (self.mip & self.mie) > 0 {
+            self.power_down = false;
+        }
+    }
+
+    fn unset_mip(&mut self, mask: u32) {
+        self.mip &= mask;
+    }
 
     fn get_phys_addr(&self, base: u32) -> Option<u32> {
         const LEVELS: i32 = 2;
@@ -129,9 +222,9 @@ impl RV32CPU {
             let mut level = LEVELS - 1;
             let mut pte_addr = (self.satp << 12) as usize;
             while level > 0 {
-                let vaddr_shift = 12 + level*10;
+                let vaddr_shift = 12 + level * 10;
                 let vpn = (base as usize >> vaddr_shift) & 0x3ff;
-                pte_addr = pte_addr + vpn*4;
+                pte_addr = pte_addr + vpn * 4;
                 let pte = self.read_phys(pte_addr);
                 let paddr = (pte as usize >> 10) << 12;
 
@@ -198,7 +291,9 @@ impl RV32CPU {
         }
     }
 
-    fn write_u32(&mut self, addr: u32, val: u32) {
+    /// Perform a 32-bit write to memory.
+    /// Returns false when a fault occured, else true.
+    fn write_u32(&mut self, addr: u32, val: u32) -> bool {
         if let Some(addr) = self.get_phys_addr(addr) {
             let addr = addr as usize;
             for mem in &mut self.mem.ranges {
@@ -206,20 +301,20 @@ impl RV32CPU {
                     let offset = addr - mem.base;
 
                     (&mut mem.mem[offset..]).put_u32_le(val);
-                    return;
+                    return true;
                 }
             }
 
             if addr >= CLINT_BASE && addr <= (CLINT_BASE + CLINT_SIZE - 4) {
                 let offset = addr - CLINT_BASE;
                 self.clint_write_u32(offset, val);
-                return;
+                return true;
             }
 
             if addr >= PLIC_BASE && addr <= (PLIC_BASE + PLIC_SIZE - 4) {
                 let offset = addr - PLIC_BASE;
                 self.plic_write_u32(offset, val);
-                return;
+                return true;
             }
 
             panic!("No fitting mem range found for {:#010x}.", addr);
@@ -228,20 +323,32 @@ impl RV32CPU {
         }
     }
 
-    fn read_u32(&mut self, addr: u32) -> u32 {
+    fn read_u32(&mut self, addr: u32) -> Option<u32> {
         if let Some(addr) = self.get_phys_addr(addr) {
             let addr = addr as usize;
             for mem in &self.mem.ranges {
                 if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
                     let offset = addr - mem.base;
 
-                    return (&mem.mem[offset..]).get_u32_le();
+                    return Some((&mem.mem[offset..]).get_u32_le());
                 }
+            }
+
+            if addr >= CLINT_BASE && addr <= (CLINT_BASE + CLINT_SIZE - 4) {
+                let offset = addr - CLINT_BASE;
+                return Some(self.clint_read_u32(addr));
+            }
+
+            if addr >= PLIC_BASE && addr <= (PLIC_BASE + PLIC_SIZE - 4) {
+                let offset = addr - PLIC_BASE;
+                return Some(self.plic_read_u32(addr));
             }
 
             panic!("No fitting mem range found for {:#010x}.", addr);
         } else {
-            todo!("mmu exception");
+            self.pending_tval = addr;
+            self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
+            None
         }
     }
 
@@ -263,14 +370,14 @@ impl RV32CPU {
         }
     }
 
-    fn read_u16(&mut self, addr: u32) -> u32 {
+    fn read_u16(&mut self, addr: u32) -> Option<u32> {
         if let Some(addr) = self.get_phys_addr(addr) {
             let addr = addr as usize;
             for mem in &self.mem.ranges {
                 if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
                     let offset = addr - mem.base;
 
-                    return (&mem.mem[offset..]).get_u16_le() as u32;
+                    return Some((&mem.mem[offset..]).get_u16_le() as u32);
                 }
             }
 
@@ -284,12 +391,18 @@ impl RV32CPU {
         if let Some(addr) = self.get_phys_addr(addr) {
             let addr = addr as usize;
             for mem in &mut self.mem.ranges {
-                if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
+                if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 1) {
                     let offset = addr - mem.base;
 
                     mem.mem[offset] = val as u8;
                     return;
                 }
+            }
+
+            if addr >= UART_BASE && addr <= (UART_BASE + UART_SIZE - 1) {
+                let offset = addr - UART_BASE;
+                self.uart_write_u8(offset, val);
+                return;
             }
 
             panic!("No fitting mem range found for {:#010x}.", addr);
@@ -298,15 +411,20 @@ impl RV32CPU {
         }
     }
 
-    fn read_u8(&mut self, addr: u32) -> u8 {
+    fn read_u8(&mut self, addr: u32) -> Option<u8> {
         if let Some(addr) = self.get_phys_addr(addr) {
             let addr = addr as usize;
             for mem in &self.mem.ranges {
                 if addr >= mem.base && addr <= (mem.base + mem.mem.len() - 4) {
                     let offset = addr - mem.base;
 
-                    return mem.mem[offset];
+                    return Some(mem.mem[offset]);
                 }
+            }
+
+            if addr >= UART_BASE && addr <= (UART_BASE + UART_SIZE - 1) {
+                let offset = addr - UART_BASE;
+                return Some(self.uart_read_u8(offset));
             }
 
             panic!("No fitting mem range found for {:#010x}.", addr);
@@ -346,6 +464,8 @@ impl RV32CPU {
 
             0x3b0 | 0x3b1 | 0x3b2 | 0x3b3 | 0x3b4 | 0x3b5 | 0x3b6 | 0x3b7 | 0x3b8 | 0x3b9
             | 0x3ba | 0x3bb | 0x3bc | 0x3bd | 0x3be | 0x3bf => self.pmpaddr[(csr & 0x0f) as usize],
+            0xc01 => 0,
+            0x342 => self.mcause,
             _ => unimplemented!("unimplemented csr read value {csr:#x}"),
         }
     }
@@ -377,7 +497,10 @@ impl RV32CPU {
                 self.mideleg = val;
             }
             0x304 => {
+                println!("mie = {:032b}", self.mie);
+                println!("val = {:032b}", self.mie);
                 self.mie = val;
+                println!("mie = {:032b}", self.mie);
             }
             0x305 => {
                 self.mtvec = val & !3;
@@ -458,7 +581,73 @@ impl RV32CPU {
             self.privl = 1;
             self.pc = self.stvec;
         } else {
-            todo!("no deleg");
+            self.mcause = cause;
+            self.mepc = self.pc;
+            self.mtval = tval;
+
+            // set mpie
+            self.mstatus &= !(1 << 7);
+            self.mstatus |= (self.privl & 1) << 7;
+
+            // set mpp
+            self.mstatus &= !(3 << 11);
+            self.mstatus |= (self.privl & 3) << 11;
+
+            // unset mie
+            self.mstatus &= !(1 << 3);
+            self.privl = 3;
+            self.pc = self.mtvec;
+        }
+    }
+
+    fn get_pending_irq_mask(&self) -> u32 {
+        let pending = self.mip & self.mie;
+        println!("mip: {:032b}", self.mip);
+        println!("mie: {:032b}", self.mie);
+        println!("     {:032b}", pending);
+
+        if pending == 0 {
+            return 0;
+        }
+
+        let enabled = match self.privl {
+            3 => {
+                // M mode
+                if self.mstatus & 0x08 > 0 {
+                    !self.mideleg
+                } else {
+                    0
+                }
+            }
+            1 => {
+                // S mode
+                if self.mstatus & 0x02 > 0 {
+                    0xffffffff
+                } else {
+                    !self.mideleg
+                }
+            }
+            _ => {
+                // U mode (or invalid)
+                0xffffffff
+            }
+        };
+
+        enabled & pending
+    }
+
+    /// Raise an interrupt and jump to interrupt handler.
+    /// Returns true if any interrup was triggered.
+    fn raise_interrupt(&mut self) -> bool {
+        let mask = self.get_pending_irq_mask();
+        if mask != 0 {
+            let irq_no = mask.trailing_zeros();
+            self.pending_exception = Some(irq_no | 0x80000000);
+            self.pending_tval = 0;
+            self.raise_exception();
+            true
+        } else {
+            false
         }
     }
 
@@ -473,25 +662,26 @@ impl RV32CPU {
             return;
         }
 
-        let insn = self.read_ins(self.pc as usize);
-        if insn.is_none() {
-            return
+        if self.mip & self.mie != 0 {
+            if self.raise_interrupt() {
+                // we only bail if an interrupt was actually triggered
+                return;
+            }
         }
 
+        let insn = self.read_ins(self.pc as usize);
+        if insn.is_none() {
+            return;
+        }
         let insn = insn.unwrap();
+
+        println!("pc: {:#010x} insn={:08x}", self.pc, insn);
 
         let opcode = insn & 0x7f;
         let quadrant = insn & 3;
         let rd = (insn >> 7) & 0x1f;
         let rs1 = (insn >> 15) & 0x1f;
         let rs2 = (insn >> 20) & 0x1f;
-
-        println!(
-            "pc={:#010x} insn={:08x} privl={}",
-            self.pc, insn, self.privl
-        );
-
-        // println!("\tq={} op={:#04x}", quadrant, opcode);
 
         if false && self.pc == 0x80000de6 {
             self.die("");
@@ -522,9 +712,12 @@ impl RV32CPU {
                         let rs1 = (insn >> 7) & 7 | 8;
                         let addr = self.regs[rs1 as usize] + imm;
 
-                        let val = self.read_u32(addr);
-                        self.regs[rd as usize] = val;
-                        self.pc += 2;
+                        if let Some(val) = self.read_u32(addr) {
+                            self.regs[rd as usize] = val;
+                            self.pc += 2;
+                        } else {
+                            return;
+                        }
                     }
                     6 => {
                         // c.sw
@@ -639,7 +832,10 @@ impl RV32CPU {
                                 let rs2 = ((insn >> 2) & 7) | 8;
                                 let funct3 = ((insn >> 5) & 3) | ((insn >> 10) & 4);
                                 match funct3 {
-                                    0 => self.regs[rd as usize] -= self.regs[rs2 as usize], // c.sub
+                                    0 => {
+                                        self.regs[rd as usize] = self.regs[rd as usize]
+                                            .wrapping_sub(self.regs[rs2 as usize])
+                                    } // c.sub
                                     1 => self.regs[rd as usize] ^= self.regs[rs2 as usize], // c.xor
                                     2 => self.regs[rd as usize] |= self.regs[rs2 as usize], // c.or
                                     3 => self.regs[rd as usize] &= self.regs[rs2 as usize], // c.and
@@ -723,12 +919,15 @@ impl RV32CPU {
                         // c.lwsp
                         let imm = ((insn >> 7) & 0x20) | ((insn << 4) & 0xc0) | (rs2 & 0x1c);
                         let addr = self.regs[2] + imm;
-                        let val = self.read_u32(addr);
-                        if rd != 0 {
-                            self.regs[rd as usize] = val;
-                        }
+                        if let Some(val) = self.read_u32(addr) {
+                            if rd != 0 {
+                                self.regs[rd as usize] = val;
+                            }
 
-                        self.pc += 2;
+                            self.pc += 2;
+                        } else {
+                            return;
+                        }
                     }
                     4 => {
                         if ((insn >> 12) & 1) == 0 {
@@ -751,11 +950,12 @@ impl RV32CPU {
                             if rs2 == 0 {
                                 if rd == 0 {
                                     // c.ebreak
-                                    todo!();
+                                    self.pending_exception = Some(CAUSE_BREAKPOINT);
+                                    return;
                                 } else {
                                     // c.jalr
                                     let val = self.pc + 2;
-                                    self.pc = self.regs[rd as usize] & 0xfffffffe;
+                                    self.pc = self.regs[rd as usize] & !1;
                                     self.regs[1] = val;
                                 }
                             } else {
@@ -786,16 +986,48 @@ impl RV32CPU {
                         let funct3 = (insn >> 12) & 7;
                         let imm = (insn as i32) >> 20;
                         let addr = self.regs[rs1 as usize].wrapping_add(imm as u32);
-                        let val;
+                        let val: u32;
 
                         match funct3 {
+                            0 => {
+                                // lb
+                                if let Some(v) = self.read_u8(addr) {
+                                    val = sext!(v as i32, 7) as u32;
+                                } else {
+                                    return;
+                                }
+                            }
+                            1 => {
+                                // lh
+                                if let Some(v) = self.read_u16(addr) {
+                                    val = sext!(v as i32, 15) as u32;
+                                } else {
+                                    return;
+                                }
+                            }
                             2 => {
                                 // lw
-                                val = self.read_u32(addr);
+                                if let Some(v) = self.read_u32(addr) {
+                                    val = v;
+                                } else {
+                                    return;
+                                }
                             }
                             4 => {
                                 // lbu
-                                val = self.read_u8(addr) as u32;
+                                if let Some(v) = self.read_u8(addr) {
+                                    val = v as u32;
+                                } else {
+                                    return;
+                                }
+                            }
+                            5 => {
+                                // lhu
+                                if let Some(v) = self.read_u16(addr) {
+                                    val = v as u32;
+                                } else {
+                                    return;
+                                }
                             }
                             _ => unimplemented!("load {}", funct3),
                         }
@@ -857,6 +1089,10 @@ impl RV32CPU {
                                 // slli
                                 val = self.regs[rs1 as usize] << imm;
                             }
+                            3 => {
+                                // sltiu
+                                val = if self.regs[rs1 as usize] < imm { 1 } else { 0 };
+                            }
                             4 => {
                                 // xori
                                 val = self.regs[rs1 as usize] ^ imm;
@@ -906,7 +1142,7 @@ impl RV32CPU {
 
                         match funct3 & 3 {
                             0 => {
-                                // xret
+                                // xret...
                                 let funct12 = insn >> 20;
                                 match funct12 {
                                     0x302 => {
@@ -915,6 +1151,21 @@ impl RV32CPU {
                                     }
                                     0x120 => {
                                         self.pc += 4;
+                                    }
+                                    0x105 => {
+                                        // wfi
+                                        if self.mip & self.mie == 0 {
+                                            println!(
+                                                "wfi @ {:#010x}",
+                                                self.get_phys_addr(self.pc).unwrap()
+                                            );
+                                            // no interrupts, go to sleep
+                                            self.power_down = true;
+                                            self.pc += 4;
+                                            return;
+                                        } else {
+                                            self.pc += 4;
+                                        }
                                     }
                                     _ => todo!("{:#x}ret", funct12),
                                 }
@@ -950,8 +1201,10 @@ impl RV32CPU {
                     0x67 => {
                         // jalr
                         let imm = insn >> 20;
+                        let imm = sext!(imm as i32, 11) as u32;
                         let val = self.pc + 4;
-                        self.pc = self.regs[rs1 as usize] + imm;
+                        let target = self.regs[rs1 as usize].wrapping_add(imm);
+                        self.pc = target;
 
                         if rd != 0 {
                             self.regs[rd as usize] = val;
@@ -1016,7 +1269,59 @@ impl RV32CPU {
                         let val2 = self.regs[rs2 as usize];
 
                         if imm == 1 {
-                            unimplemented!();
+                            let funct3 = (insn >> 12) & 7;
+                            match funct3 {
+                                0 => {
+                                    // mul
+                                    val = (val as u64 * val2 as u64) as u32;
+                                }
+                                3 => {
+                                    // mulhu
+                                    val = ((val as u64 * val2 as u64) >> 32) as u32;
+                                }
+                                4 => {
+                                    // div
+                                    if val2 == 0 {
+                                        val = (-1i32) as u32;
+                                    } else if val == 0x80000000 && val2 == (-1i32) as u32 {
+                                        val = val;
+                                    } else {
+                                        val = (val as i32 / val2 as i32) as u32;
+                                    }
+                                }
+                                5 => {
+                                    // divu
+                                    if val2 == 0 {
+                                        val = (-1i32) as u32;
+                                    } else {
+                                        val = val / val2;
+                                    }
+                                }
+                                6 => {
+                                    // rem
+                                    if val2 == 0 {
+                                        val = val;
+                                    } else if val == 0x80000000 && val2 == (-1i32) as u32 {
+                                        val = 0;
+                                    } else {
+                                        val = (val as i32 & val2 as i32) as u32;
+                                    }
+                                }
+                                7 => {
+                                    // remu
+                                    if val2 == 0 {
+                                        val = val;
+                                    } else {
+                                        val = val % val2;
+                                    }
+                                }
+                                _ => todo!("mul {}", funct3),
+                            }
+
+                            if rd != 0 {
+                                self.regs[rd as usize] = val;
+                            }
+                            self.pc += 4;
                         } else {
                             if (imm & !0x20) != 0 {
                                 self.illegal_instruction();
@@ -1025,7 +1330,7 @@ impl RV32CPU {
                             let funct3 = ((insn >> 12) & 7) | ((insn >> (30 - 3)) & (1 << 3));
                             match funct3 {
                                 0 => {
-                                    val += val2;
+                                    val = val.wrapping_add(val2);
                                 }
                                 1 => {
                                     val = val.wrapping_shl(val2);
@@ -1078,11 +1383,49 @@ impl RV32CPU {
                                 match funct5 {
                                     0 => {
                                         // amoadd.w
-                                        let val = self.read_u32(addr);
-                                        let val2 = self.regs[rs2 as usize];
-                                        let res = val.wrapping_add(val2);
-                                        self.write_u32(addr, res);
-                                        self.regs[rd as usize] = val;
+                                        if let Some(val) = self.read_u32(addr) {
+                                            let val2 = self.regs[rs2 as usize];
+                                            let res = val.wrapping_add(val2);
+                                            self.write_u32(addr, res);
+                                            self.regs[rd as usize] = val;
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                    2 => {
+                                        // lr.w
+                                        if rs2 != 0 {
+                                            self.die("illegal instruction");
+                                        }
+
+                                        if let Some(val) = self.read_u32(addr) {
+                                            self.regs[rd as usize] = val;
+                                            self.load_res = addr;
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                    3 => {
+                                        // sc.w
+                                        if self.load_res == addr {
+                                            if !self.write_u32(addr, self.regs[rs2 as usize]) {
+                                                return;
+                                            }
+                                            self.regs[rd as usize] = 0;
+                                        } else {
+                                            self.regs[rd as usize] = 1;
+                                        }
+                                    }
+                                    8 => {
+                                        // amoor.w
+                                        if let Some(val) = self.read_u32(addr) {
+                                            let val2 = self.regs[rs2 as usize];
+                                            let res = val | val2;
+                                            self.write_u32(addr, res);
+                                            self.regs[rd as usize] = val;
+                                        } else {
+                                            return;
+                                        }
                                     }
                                     _ => unimplemented!("amoX.w {}", funct5),
                                 }
@@ -1252,15 +1595,19 @@ fn main() {
     let cfg = VMConfig {
         machine: VMMachineSpec::RV32,
         memory_mb: 128,
-        bios_path: String::from("./configs/rv32-linux/bbl32.bin"),
-        kernel_path: String::from("./configs/rv32-linux/kernel-riscv32.bin"),
-        dtb_path: String::from("./configs/rv32-linux/riscvemu.dtb"),
-        drive: String::from("./configs/rv32-linux/root-riscv32.bin"),
+        bios_path: String::from("./configs/rv32-zephyr/zephyr.bin"),
+        kernel_path: String::from("/dev/null"),
+        dtb_path: String::from("/dev/null"),
+        drive: String::from("/dev/null"),
     };
 
     let mut machine = VMMachine::from_config(&cfg);
 
     loop {
         machine.run();
+
+        if RV32CPU::rtc_time() > machine.cpu.timecmp && (machine.cpu.mip & 0x80 == 0) {
+            machine.cpu.set_mip(0x80); // MTIP
+        }
     }
 }
