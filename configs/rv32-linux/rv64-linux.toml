@@ -1,6 +1,0 @@
-[vm]
-machine = "riscv64"
-memory = 128
-bios = "bbl64.bin"
-kernel = "linux-riscv64.bin"
-cmdline = "console=hvc0 root=/dev/vda rw"
