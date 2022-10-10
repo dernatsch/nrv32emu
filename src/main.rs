@@ -139,7 +139,7 @@ impl RV32CPU {
     }
 
     fn clint_write_u32(&mut self, offset: usize, val: u32) {
-        println!("clint@{:#010x} <- {:#010x}", offset, val);
+        // println!("clint@{:#010x} <- {:#010x}", offset, val);
         match offset {
             0x4000 => {
                 self.timecmp = (self.timecmp & !0xffffffff) | val as u64;
@@ -497,10 +497,7 @@ impl RV32CPU {
                 self.mideleg = val;
             }
             0x304 => {
-                println!("mie = {:032b}", self.mie);
-                println!("val = {:032b}", self.mie);
                 self.mie = val;
-                println!("mie = {:032b}", self.mie);
             }
             0x305 => {
                 self.mtvec = val & !3;
@@ -602,10 +599,6 @@ impl RV32CPU {
 
     fn get_pending_irq_mask(&self) -> u32 {
         let pending = self.mip & self.mie;
-        println!("mip: {:032b}", self.mip);
-        println!("mie: {:032b}", self.mie);
-        println!("     {:032b}", pending);
-
         if pending == 0 {
             return 0;
         }
@@ -675,7 +668,7 @@ impl RV32CPU {
         }
         let insn = insn.unwrap();
 
-        println!("pc: {:#010x} insn={:08x}", self.pc, insn);
+        // println!("pc: {:#010x} insn={:08x}", self.pc, insn);
 
         let opcode = insn & 0x7f;
         let quadrant = insn & 3;
@@ -1180,11 +1173,24 @@ impl RV32CPU {
                                 }
                                 self.pc += 4;
                             }
-                            2 | 3 => {
-                                // csrrs, csrrc
+                            2 => {
+                                // csrrs
                                 let val2 = self.read_csr(imm);
                                 if rs1 != 0 {
                                     val = val2 | val;
+                                    self.write_csr(imm, val);
+                                }
+
+                                if rd != 0 {
+                                    self.regs[rd as usize] = val2;
+                                }
+                                self.pc += 4;
+                            }
+                            3 => {
+                                // csrrc
+                                let val2 = self.read_csr(imm);
+                                if rs1 != 0 {
+                                    val = val2 & !val;
                                     self.write_csr(imm, val);
                                 }
 
@@ -1607,7 +1613,7 @@ fn main() {
         machine.run();
 
         if RV32CPU::rtc_time() > machine.cpu.timecmp && (machine.cpu.mip & 0x80 == 0) {
-            machine.cpu.set_mip(0x80); // MTIP
+            // machine.cpu.set_mip(0x80); // MTIP
         }
     }
 }
