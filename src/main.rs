@@ -238,7 +238,7 @@ impl RV32CPU {
             while level > 0 {
                 let vaddr_shift = 12 + level * 10;
                 let vpn = (base as usize >> vaddr_shift) & 0x3ff;
-                pte_addr = pte_addr + vpn * 4;
+                pte_addr += vpn * 4;
                 let pte = self.read_phys(pte_addr);
                 let paddr = (pte as usize >> 10) << 12;
 
@@ -263,7 +263,7 @@ impl RV32CPU {
                     // TODO: set dirty flag on write
 
                     let vaddr_mask: u32 = (1 << vaddr_shift) - 1;
-                    let phys_addr: u32 = (base as u32 & vaddr_mask) | (paddr as u32 & !vaddr_mask);
+                    let phys_addr: u32 = (base & vaddr_mask) | (paddr as u32 & !vaddr_mask);
                     return Some(phys_addr);
                 }
             }
@@ -273,7 +273,7 @@ impl RV32CPU {
     }
 
     fn read_phys(&self, base: usize) -> u32 {
-        let base = base as usize;
+        let base = base;
         for mem in &self.mem.ranges {
             if base >= mem.base && base < (mem.base + mem.mem.len()) {
                 let offset = base - mem.base;
@@ -319,13 +319,13 @@ impl RV32CPU {
                 }
             }
 
-            if addr >= CLINT_BASE && addr <= (CLINT_BASE + CLINT_SIZE - 4) {
+            if (CLINT_BASE..=(CLINT_BASE + CLINT_SIZE - 4)).contains(&addr) {
                 let offset = addr - CLINT_BASE;
                 self.clint_write_u32(offset, val);
                 return true;
             }
 
-            if addr >= PLIC_BASE && addr <= (PLIC_BASE + PLIC_SIZE - 4) {
+            if (PLIC_BASE..=(PLIC_BASE + PLIC_SIZE - 4)).contains(&addr) {
                 let offset = addr - PLIC_BASE;
                 self.plic_write_u32(offset, val);
                 return true;
@@ -348,12 +348,12 @@ impl RV32CPU {
                 }
             }
 
-            if addr >= CLINT_BASE && addr <= (CLINT_BASE + CLINT_SIZE - 4) {
+            if (CLINT_BASE..=(CLINT_BASE + CLINT_SIZE - 4)).contains(&addr) {
                 let offset = addr - CLINT_BASE;
                 return Some(self.clint_read_u32(offset));
             }
 
-            if addr >= PLIC_BASE && addr <= (PLIC_BASE + PLIC_SIZE - 4) {
+            if (PLIC_BASE..=(PLIC_BASE + PLIC_SIZE - 4)).contains(&addr) {
                 let offset = addr - PLIC_BASE;
                 return Some(self.plic_read_u32(offset));
             }
@@ -413,7 +413,7 @@ impl RV32CPU {
                 }
             }
 
-            if addr >= UART_BASE && addr <= (UART_BASE + UART_SIZE - 1) {
+            if (UART_BASE..=(UART_BASE + UART_SIZE - 1)).contains(&addr) {
                 let offset = addr - UART_BASE;
                 self.uart_write_u8(offset, val);
                 return;
@@ -436,7 +436,7 @@ impl RV32CPU {
                 }
             }
 
-            if addr >= UART_BASE && addr <= (UART_BASE + UART_SIZE - 1) {
+            if (UART_BASE..=(UART_BASE + UART_SIZE - 1)).contains(&addr) {
                 let offset = addr - UART_BASE;
                 return Some(self.uart_read_u8(offset));
             }
@@ -663,11 +663,9 @@ impl RV32CPU {
             return;
         }
 
-        if self.mip & self.mie != 0 {
-            if self.raise_interrupt() {
-                // we only bail if an interrupt was actually triggered
-                return;
-            }
+        if self.mip & self.mie != 0 && self.raise_interrupt() {
+            // we only bail if an interrupt was actually triggered
+            return;
         }
 
         let insn = self.read_ins(self.pc as usize);
@@ -717,7 +715,7 @@ impl RV32CPU {
                             self.regs[rd as usize] = val;
                             self.pc += 2;
                         } else {
-                            return;
+                            
                         }
                     }
                     6 => {
@@ -927,7 +925,7 @@ impl RV32CPU {
 
                             self.pc += 2;
                         } else {
-                            return;
+                            
                         }
                     }
                     4 => {
@@ -1025,7 +1023,7 @@ impl RV32CPU {
                             5 => {
                                 // lhu
                                 if let Some(v) = self.read_u16(addr) {
-                                    val = v as u32;
+                                    val = v;
                                 } else {
                                     return;
                                 }
@@ -1158,7 +1156,7 @@ impl RV32CPU {
                                         if self.mip & self.mie == 0 {
                                             self.power_down = true;
                                             self.pc += 4;
-                                            return;
+                                            
                                         } else {
                                             self.pc += 4;
                                         }
@@ -1180,7 +1178,7 @@ impl RV32CPU {
                                 // csrrs
                                 let val2 = self.read_csr(imm);
                                 if rs1 != 0 {
-                                    val = val2 | val;
+                                    val |= val2;
                                     self.write_csr(imm, val);
                                 }
 
@@ -1303,7 +1301,7 @@ impl RV32CPU {
                                     if val2 == 0 {
                                         val = (-1i32) as u32;
                                     } else {
-                                        val = val / val2;
+                                        val /= val2;
                                     }
                                 }
                                 6 => {
@@ -1321,7 +1319,7 @@ impl RV32CPU {
                                     if val2 == 0 {
                                         val = val;
                                     } else {
-                                        val = val % val2;
+                                        val %= val2;
                                     }
                                 }
                                 _ => todo!("mul {}", funct3),
@@ -1537,7 +1535,7 @@ impl VMMemory {
             if base >= mem.base && (base + data.len()) <= (mem.base + mem.mem.len()) {
                 let offset = base - mem.base;
 
-                mem.mem[offset..][..data.len()].copy_from_slice(&data[..]);
+                mem.mem[offset..][..data.len()].copy_from_slice(data);
                 return data.len();
             }
         }
@@ -1621,11 +1619,9 @@ fn main() {
         if machine.cpu.mip & 0x80 == 0 {
             if now > machine.cpu.timecmp {
                 machine.cpu.set_mip(0x80); // MIP
-            } else {
-                if machine.cpu.power_down {
-                    sleeptime = machine.cpu.timecmp - now;
-                    sleeptime = sleeptime.max(MAX_SLEEP_TIME);
-                }
+            } else if machine.cpu.power_down {
+                sleeptime = machine.cpu.timecmp - now;
+                sleeptime = sleeptime.max(MAX_SLEEP_TIME);
             }
         }
 
