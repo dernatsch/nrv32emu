@@ -1159,6 +1159,7 @@ impl RV32CPU {
                                     0x000 => {
                                         // ecall
                                         self.pending_exception = Some(CAUSE_USER_ECALL + self.privl);
+                                        return
                                     }
                                     0x001 => {
                                         // ebreak
