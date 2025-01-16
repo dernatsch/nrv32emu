@@ -56,6 +56,7 @@ struct RV32CPU {
     mscratch: u32,
     misa: u32,
     mstatus: u32,
+    mstatush: u32,
     mcounteren: u32,
     mie: u32,
     mip: u32,
@@ -74,7 +75,7 @@ struct RV32CPU {
     sepc: u32,
     stval: u32,
 
-    pmpaddr: [u32; 16],
+    pmpaddr: [u32; 64],
     pmpcfg: [u32; 4],
 
     pending_exception: Option<u32>,
@@ -89,7 +90,7 @@ struct RV32CPU {
 
 const CLINT_BASE: usize = 0x02000000;
 const CLINT_SIZE: usize = 0x0010000;
-const PLIC_BASE: usize = 0x0c000000;
+const PLIC_BASE: usize = 0x40100000;
 const PLIC_SIZE: usize = 0x04000000;
 const UART_BASE: usize = 0x10000000;
 const UART_SIZE: usize = 0x00000100;
@@ -110,6 +111,7 @@ impl RV32CPU {
             mtvec: 0,
             mscratch: 0,
             mstatus: 0,
+            mstatush: 0,
             misa: (1<<18) | // S
                 (1<<20) |   // U
                 (1<<8) |    // I
@@ -139,7 +141,7 @@ impl RV32CPU {
             stval: 0,
 
             pmpcfg: [0u32; 4],
-            pmpaddr: [0u32; 16],
+            pmpaddr: [0u32; 64],
 
             pending_exception: None,
             pending_tval: 0,
@@ -470,17 +472,18 @@ impl RV32CPU {
             0x304 => self.mie,
             0x305 => self.mtvec,
             0x306 => self.mcounteren,
+            0x310 => self.mstatush,
             0x340 => self.mscratch,
             0x341 => self.mepc,
             0x344 => self.mip,
             0xf14 => self.mhartid,
             0x3a0 | 0x3a1 | 0x3a2 | 0x3a3 => self.pmpcfg[(csr & 0x0f) as usize],
 
-            0x3b0 | 0x3b1 | 0x3b2 | 0x3b3 | 0x3b4 | 0x3b5 | 0x3b6 | 0x3b7 | 0x3b8 | 0x3b9
-            | 0x3ba | 0x3bb | 0x3bc | 0x3bd | 0x3be | 0x3bf => self.pmpaddr[(csr & 0x0f) as usize],
+            0x3b0..=0x3ff => self.pmpaddr[(csr & 0x3f) as usize],
             0xc01 => 0,
             0x342 => self.mcause,
-            _ => unimplemented!("unimplemented csr read value {csr:#x}"),
+            // _ => unimplemented!("unimplemented csr read value {csr:#x}"),
+            _ => 0,
         }
     }
 
@@ -519,6 +522,9 @@ impl RV32CPU {
             0x306 => {
                 self.mcounteren = val;
             }
+            0x310 => {
+                self.mstatush = val;
+            }
             0x340 => {
                 self.mscratch = val;
             }
@@ -531,11 +537,11 @@ impl RV32CPU {
             0x3a0 | 0x3a1 | 0x3a2 | 0x3a3 => {
                 self.pmpcfg[(csr & 0x0f) as usize] = val;
             }
-            0x3b0 | 0x3b1 | 0x3b2 | 0x3b3 | 0x3b4 | 0x3b5 | 0x3b6 | 0x3b7 | 0x3b8 | 0x3b9
-            | 0x3ba | 0x3bb | 0x3bc | 0x3bd | 0x3be | 0x3bf => {
-                self.pmpaddr[(csr & 0x0f) as usize] = val;
+            0x3b0..=0x3ff => {
+                self.pmpaddr[(csr & 0x3f) as usize] = val;
             }
-            _ => unimplemented!("unimplemented csr write value {csr:#x}"),
+            // _ => unimplemented!("unimplemented csr write value {csr:#x}"),
+            _ => {}
         }
     }
 
@@ -1144,6 +1150,11 @@ impl RV32CPU {
                                 // xret...
                                 let funct12 = insn >> 20;
                                 match funct12 {
+                                    0x001 => {
+                                        // ebreak
+                                        self.pending_exception = Some(CAUSE_BREAKPOINT);
+                                        return;
+                                    }
                                     0x302 => {
                                         // mret
                                         self.do_mret();
@@ -1399,6 +1410,17 @@ impl RV32CPU {
                                             return;
                                         }
                                     }
+                                    1 => {
+                                        // amoswap.w
+                                        if let Some(val) = self.read_u32(addr) {
+                                            let val2 = self.regs[rs2 as usize];
+                                            self.write_u32(addr, val2);
+                                            self.regs[rd as usize] = val;
+                                        } else {
+                                            return;
+                                        }
+
+                                    }
                                     2 => {
                                         // lr.w
                                         if rs2 != 0 {
@@ -1601,9 +1623,9 @@ fn main() {
     let cfg = VMConfig {
         machine: VMMachineSpec::RV32,
         memory_mb: 128,
-        bios_path: String::from("./configs/rv32-zephyr/zephyr.bin"),
+        bios_path: String::from("./configs/rv32-opensbi/fw_payload.bin"),
         kernel_path: String::from("/dev/null"),
-        dtb_path: String::from("/dev/null"),
+        dtb_path: String::from("./configs/rv32-opensbi/riscvemu.dtb"),
         drive: String::from("/dev/null"),
     };
 
