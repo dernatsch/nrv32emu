@@ -119,7 +119,8 @@ impl RV32CPU {
                 (1<<0) |    // A
                 // (1<<5) |    // F
                 // (1<<3) |    // D
-                (1<<2), // C
+                (1<<2) | // C
+                (1<<30), // XLEN=32
 
             mcounteren: 0,
 
@@ -1093,6 +1094,10 @@ impl RV32CPU {
                             1 => {
                                 // slli
                                 val = self.regs[rs1 as usize] << imm;
+                            }
+                            2 => {
+                                // slti
+                                val = if (self.regs[rs1 as usize] as i32) < (imm as i32) { 1 } else { 0 };
                             }
                             3 => {
                                 // sltiu
