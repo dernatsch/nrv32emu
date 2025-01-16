@@ -99,6 +99,7 @@ const CAUSE_FETCH_PAGE_FAULT: u32 = 0x0c;
 const CAUSE_LOAD_PAGE_FAULT: u32 = 0x0d;
 const CAUSE_INTERRUPT: u32 = 0x80;
 const CAUSE_BREAKPOINT: u32 = 0x03;
+const CAUSE_USER_ECALL: u32 = 0x8;
 
 impl RV32CPU {
     fn new() -> Self {
@@ -1155,6 +1156,10 @@ impl RV32CPU {
                                 // xret...
                                 let funct12 = insn >> 20;
                                 match funct12 {
+                                    0x000 => {
+                                        // ecall
+                                        self.pending_exception = Some(CAUSE_USER_ECALL + self.privl);
+                                    }
                                     0x001 => {
                                         // ebreak
                                         self.pending_exception = Some(CAUSE_BREAKPOINT);
