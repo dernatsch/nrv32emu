@@ -1158,11 +1158,13 @@ impl RV32CPU {
                                 match funct12 {
                                     0x000 => {
                                         // ecall
+                                        println!("ecall! a7={:#010x} a6={:#010x}", self.regs[17], self.regs[16]);
                                         self.pending_exception = Some(CAUSE_USER_ECALL + self.privl);
                                         return
                                     }
                                     0x001 => {
                                         // ebreak
+                                        println!("ebreak! pc={:#010x}", self.pc);
                                         self.pending_exception = Some(CAUSE_BREAKPOINT);
                                         return;
                                     }
@@ -1333,7 +1335,7 @@ impl RV32CPU {
                                     } else if val == 0x80000000 && val2 == (-1i32) as u32 {
                                         val = 0;
                                     } else {
-                                        val = (val as i32 & val2 as i32) as u32;
+                                        val = (val as i32 % val2 as i32) as u32;
                                     }
                                 }
                                 7 => {
@@ -1371,7 +1373,7 @@ impl RV32CPU {
                                     val ^= val2;
                                 }
                                 5 | 13 => {
-                                    val >>= val2;
+                                    val >>= val2 & 0x1f;
                                 }
                                 6 => {
                                     val |= val2;
@@ -1474,6 +1476,10 @@ impl RV32CPU {
                         }
 
                         self.pc += 4;
+                    }
+                    0x1b => {
+                        // OP-32
+                        panic!("OP-32");
                     }
                     0x93 => {
                         panic!();
