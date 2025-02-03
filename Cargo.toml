@@ -7,4 +7,6 @@ edition = "2021"
 
 [dependencies]
 bytes = "1.2.1"
+env_logger = "0.11.6"
+log = "0.4.25"
 toml = "0.5.9"

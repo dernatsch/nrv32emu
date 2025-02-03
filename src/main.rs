@@ -22,6 +22,7 @@
 */
 
 use bytes::{Buf, BufMut};
+use log::{info, debug, trace, warn};
 
 macro_rules! sext {
     ($val:expr, $topbit:expr) => {
@@ -162,6 +163,7 @@ impl RV32CPU {
     }
 
     fn clint_write_u32(&mut self, offset: usize, val: u32) {
+        debug!("clint write: off={:#010x} val={:#010x}", offset, val);
         match offset {
             0x4000 => {
                 self.timecmp = (self.timecmp & !0xffffffff) | val as u64;
@@ -176,6 +178,7 @@ impl RV32CPU {
     }
 
     fn clint_read_u32(&mut self, offset: usize) -> u32 {
+        debug!("clint read: off={:#010x}", offset);
         match offset {
             0xbff8 => Self::rtc_time() as u32,
             0xbffc => (Self::rtc_time() >> 32) as u32,
@@ -483,9 +486,19 @@ impl RV32CPU {
 
             0x3b0..=0x3ff => self.pmpaddr[(csr & 0x3f) as usize],
             0xc01 => 0,
+            0x320..=0x33f => 0, //XXX: counter setup
+
+            0x340 => self.mscratch,
+            0x341 => self.mepc,
             0x342 => self.mcause,
-            // _ => unimplemented!("unimplemented csr read value {csr:#x}"),
-            _ => 0,
+            0x343 => self.mtval,
+            0x344 => self.mip,
+
+            0xb00..=0xb9f => 0, //XXX: performance counter
+            0xda0 => 0, // supervisor count overflow
+            0xfb0 => 0, //XXX: don't know
+            0xf11..=0xf13 => 0, // mvendorid, marchid, mimpid
+            _ => unimplemented!("unimplemented csr read value {csr:#x}"),
         }
     }
 
@@ -542,8 +555,8 @@ impl RV32CPU {
             0x3b0..=0x3ff => {
                 self.pmpaddr[(csr & 0x3f) as usize] = val;
             }
-            // _ => unimplemented!("unimplemented csr write value {csr:#x}"),
-            _ => {}
+            0xb00..=0xb9f => {}
+            _ => unimplemented!("unimplemented csr write value {csr:#x}"),
         }
     }
 
@@ -682,7 +695,7 @@ impl RV32CPU {
         }
         let insn = insn.unwrap();
 
-        // println!("pc: {:#010x} insn={:08x}", self.pc, insn);
+        trace!("pc: {:#010x} insn={:08x}", self.pc, insn);
 
         let opcode = insn & 0x7f;
         let quadrant = insn & 3;
@@ -1461,9 +1474,14 @@ impl RV32CPU {
                                             if !self.write_u32(addr, self.regs[rs2 as usize]) {
                                                 return;
                                             }
-                                            self.regs[rd as usize] = 0;
+                                            
+                                            if rd != 0 {
+                                                self.regs[rd as usize] = 0;
+                                            }
                                         } else {
-                                            self.regs[rd as usize] = 1;
+                                            if rd != 0 {
+                                                self.regs[rd as usize] = 1;
+                                            }
                                         }
                                     }
                                     8 => {
@@ -1471,6 +1489,19 @@ impl RV32CPU {
                                         if let Some(val) = self.read_u32(addr) {
                                             let val2 = self.regs[rs2 as usize];
                                             let res = val | val2;
+                                            self.write_u32(addr, res);
+                                            if rd != 0 {
+                                                self.regs[rd as usize] = val;
+                                            }
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                    12 => {
+                                        // amoand.w
+                                        if let Some(val) = self.read_u32(addr) {
+                                            let val2 = self.regs[rs2 as usize];
+                                            let res = val & val2;
                                             self.write_u32(addr, res);
                                             if rd != 0 {
                                                 self.regs[rd as usize] = val;
@@ -1647,12 +1678,14 @@ impl VMMachine {
 }
 
 fn main() {
+    env_logger::init();
+
     let cfg = VMConfig {
         machine: VMMachineSpec::RV32,
         memory_mb: 128,
-        bios_path: String::from("./configs/rv32-opensbi/fw_payload.bin"),
+        bios_path: String::from("./configs/rv32-linux-nommu/Image"),
         kernel_path: String::from("/dev/null"),
-        dtb_path: String::from("./configs/rv32-opensbi/riscvemu.dtb"),
+        dtb_path: String::from("./configs/rv32-linux-nommu/riscvemu.dtb"),
         drive: String::from("/dev/null"),
     };
 
