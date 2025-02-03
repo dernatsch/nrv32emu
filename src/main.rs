@@ -1418,7 +1418,9 @@ impl RV32CPU {
                                             let val2 = self.regs[rs2 as usize];
                                             let res = val.wrapping_add(val2);
                                             self.write_u32(addr, res);
-                                            self.regs[rd as usize] = val;
+                                            if rd != 0 {
+                                                self.regs[rd as usize] = val;
+                                            }
                                         } else {
                                             return;
                                         }
@@ -1428,7 +1430,9 @@ impl RV32CPU {
                                         if let Some(val) = self.read_u32(addr) {
                                             let val2 = self.regs[rs2 as usize];
                                             self.write_u32(addr, val2);
-                                            self.regs[rd as usize] = val;
+                                            if rd != 0 {
+                                                self.regs[rd as usize] = val;
+                                            }
                                         } else {
                                             return;
                                         }
@@ -1464,7 +1468,9 @@ impl RV32CPU {
                                             let val2 = self.regs[rs2 as usize];
                                             let res = val | val2;
                                             self.write_u32(addr, res);
-                                            self.regs[rd as usize] = val;
+                                            if rd != 0 {
+                                                self.regs[rd as usize] = val;
+                                            }
                                         } else {
                                             return;
                                         }
