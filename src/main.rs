@@ -224,7 +224,7 @@ impl RV32CPU {
     }
 
     fn unset_mip(&mut self, mask: u32) {
-        self.mip &= mask;
+        self.mip &= !mask;
     }
 
     fn get_phys_addr(&self, base: u32) -> Option<u32> {
