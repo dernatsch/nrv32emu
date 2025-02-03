@@ -1306,6 +1306,10 @@ impl RV32CPU {
                                     // mul
                                     val = (val as u64 * val2 as u64) as u32;
                                 }
+                                1 => {
+                                    // mulh
+                                    val = ((val as i64 * val2 as i64) >> 32) as u32;
+                                }
                                 3 => {
                                     // mulhu
                                     val = ((val as u64 * val2 as u64) >> 32) as u32;
