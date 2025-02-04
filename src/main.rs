@@ -248,18 +248,6 @@ impl RV32CPU {
         self.mip &= !mask;
     }
 
-    fn dump_vmem(&self, addr: u32) {
-        println!("Virtual Memory Dump");
-        println!("-------------------");
-        let mode = self.satp >> 31;
-        if self.privl == 3 || mode == 0 {
-            println!("Paging disabled.");
-        }
-
-        let pte_addr = (self.satp << 12) as usize;
-        println!("initial pte addr: {:#010x}", pte_addr);
-    }
-
     fn get_phys_addr(&self, base: u32) -> Option<u32> {
         const LEVELS: i32 = 2;
 
