@@ -67,7 +67,7 @@
 
 	chosen {
 		stdout-path = "/soc/serial";
-		bootargs = "earlycon";
+		bootargs = "earlycon keep_bootcon";
 		riscv,kernel-start = <0x00 0x80400000>;
 		riscv,kernel-end = <0x00 0x8071a37c>;
 	};

@@ -23,6 +23,7 @@
 
 use bytes::{Buf, BufMut};
 use log::{info, debug, trace, warn};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 macro_rules! sext {
     ($val:expr, $topbit:expr) => {
@@ -163,7 +164,7 @@ impl RV32CPU {
     }
 
     fn clint_write_u32(&mut self, offset: usize, val: u32) {
-        debug!("clint write: off={:#010x} val={:#010x}", offset, val);
+        trace!("clint write: off={:#010x} val={:#010x}", offset, val);
         match offset {
             0x4000 => {
                 self.timecmp = (self.timecmp & !0xffffffff) | val as u64;
@@ -173,25 +174,33 @@ impl RV32CPU {
                 self.timecmp = (self.timecmp & 0xffffffff) | ((val as u64) << 32);
                 self.unset_mip(0x80);
             }
-            _ => {}
+            _ => unimplemented!("clint write off={:#010x}", offset),
         }
     }
 
     fn clint_read_u32(&mut self, offset: usize) -> u32 {
-        debug!("clint read: off={:#010x}", offset);
+        trace!("clint read: off={:#010x}", offset);
         match offset {
-            0xbff8 => Self::rtc_time() as u32,
-            0xbffc => (Self::rtc_time() >> 32) as u32,
+            0xbff8 => (Self::rtc_time() / 100) as u32,
+            0xbffc => ((Self::rtc_time() / 100) >> 32) as u32,
             0x4000 => self.timecmp as u32,
             0x4004 => (self.timecmp >> 32) as u32,
-            _ => 0,
+            _ => unimplemented!("clint read off={:#010x}", offset),
         }
     }
 
-    fn plic_write_u32(&mut self, _offset: usize, _val: u32) {}
+    fn plic_write_u32(&mut self, offset: usize, _val: u32) {
+        match offset {
+            _ => {},
+            // _ => unimplemented!("PLIC write offset {:#010x}", offset),
+        }
+    }
 
-    fn plic_read_u32(&mut self, _offset: usize) -> u32 {
-        0
+    fn plic_read_u32(&mut self, offset: usize) -> u32 {
+        match offset {
+            _ => 0,
+            // _ => unimplemented!("PLIC read offset {:#010x}", offset),
+        }
     }
 
     fn uart_write_u8(&mut self, offset: usize, val: u32) {
@@ -338,7 +347,7 @@ impl RV32CPU {
                 return true;
             }
 
-            panic!("No fitting mem range found for {:#010x}.", addr);
+            self.die(&format!("No fitting mem range found for {:#010x}.", addr));
         } else {
             todo!("mmu exception");
         }
@@ -529,6 +538,7 @@ impl RV32CPU {
                 self.mideleg = val;
             }
             0x304 => {
+                info!("mie set to {:#010x} pc={:#010x}", val, self.pc);
                 self.mie = val;
             }
             0x305 => {
@@ -578,6 +588,8 @@ impl RV32CPU {
     fn raise_exception(&mut self) {
         let cause = self.pending_exception.unwrap();
         let tval = self.pending_tval;
+
+        debug!("EXCEPTION: cause={:#010x} tval={:#010x}", cause, tval);
 
         let deleg;
         if self.privl <= 2 {
@@ -666,6 +678,7 @@ impl RV32CPU {
         let mask = self.get_pending_irq_mask();
         if mask != 0 {
             let irq_no = mask.trailing_zeros();
+            debug!("INTERRUPT {} raised", irq_no);
             self.pending_exception = Some(irq_no | 0x80000000);
             true
         } else {
@@ -677,6 +690,8 @@ impl RV32CPU {
         //TODO: check interrupts
         //TODO: TLB (this probably needs a caching system, reading from memory
         // would need to search the ranges and then the tlb to translate an addr)
+
+        debug_assert!(self.regs[0] == 0);
 
         if self.pending_exception.is_some() {
             self.raise_exception();
@@ -1171,13 +1186,13 @@ impl RV32CPU {
                                 match funct12 {
                                     0x000 => {
                                         // ecall
-                                        println!("ecall! a7={:#010x} a6={:#010x}", self.regs[17], self.regs[16]);
+                                        debug!("ecall! a7={:#010x} a6={:#010x}", self.regs[17], self.regs[16]);
                                         self.pending_exception = Some(CAUSE_USER_ECALL + self.privl);
                                         return
                                     }
                                     0x001 => {
                                         // ebreak
-                                        println!("ebreak! pc={:#010x}", self.pc);
+                                        debug!("ebreak! pc={:#010x}", self.pc);
                                         self.pending_exception = Some(CAUSE_BREAKPOINT);
                                         return;
                                     }
@@ -1401,7 +1416,8 @@ impl RV32CPU {
                                 8 => {
                                     val = val.wrapping_sub(val2);
                                 }
-                                _ => self.illegal_instruction(),
+                                _ => self.die(&format!("funct3 {}", funct3)),
+                                //_ => self.illegal_instruction(),
                             }
 
                             if rd != 0 {
@@ -1580,6 +1596,7 @@ impl std::fmt::Debug for RV32CPU {
         writeln!(f, "mstatus: {:#010x}", self.mstatus)?;
         writeln!(f, "mie: {:#010x} mip: {:#010x}", self.mie, self.mip)?;
         writeln!(f, "mtvec: {:#010x} stvec: {:#010x}", self.mtvec, self.stvec)?;
+        writeln!(f, "mtimecmp: {:#010x} ({:#010x})", self.timecmp, Self::rtc_time() / 100);
         writeln!(
             f,
             "satp: {} {:#010x}",
@@ -1683,31 +1700,44 @@ fn main() {
     let cfg = VMConfig {
         machine: VMMachineSpec::RV32,
         memory_mb: 128,
-        bios_path: String::from("./configs/rv32-linux-nommu/Image"),
-        kernel_path: String::from("/dev/null"),
-        dtb_path: String::from("./configs/rv32-linux-nommu/riscvemu.dtb"),
+        bios_path: String::from("./configs/rv32-opensbi/fw_jump.bin"),
+        kernel_path: String::from("./configs/rv32-opensbi/Image"),
+        dtb_path: String::from("./configs/rv32-opensbi/riscvemu.dtb"),
         drive: String::from("/dev/null"),
     };
 
     let mut machine = VMMachine::from_config(&cfg);
 
+    let mut killed = Arc::new(AtomicBool::new(false));
+    let k2 = killed.clone();
+    ctrlc::set_handler(move || {
+        k2.store(true, Ordering::Relaxed);
+    }).expect("setting Ctrl+C handler");
+
     loop {
+        if killed.load(Ordering::Relaxed) {
+            machine.cpu.die("stopped by signal");
+        }
+
         machine.run();
 
         const MAX_SLEEP_TIME: u64 = 10000000; // [ns] = 10 ms
 
         let mut sleeptime = 0;
-        let now = RV32CPU::rtc_time();
+        let now = RV32CPU::rtc_time() / 100;
         if machine.cpu.mip & 0x80 == 0 {
             if now > machine.cpu.timecmp {
+                debug!("INTERRUPT from timer");
                 machine.cpu.set_mip(0x80); // MIP
             } else if machine.cpu.power_down {
                 sleeptime = machine.cpu.timecmp - now;
                 sleeptime = sleeptime.max(MAX_SLEEP_TIME);
+
+                debug!("power down for {}ns", sleeptime);
             }
         }
 
-        if sleeptime > 0 {
+        if false && sleeptime > 0 {
             std::thread::sleep(std::time::Duration::from_nanos(sleeptime));
         }
     }
