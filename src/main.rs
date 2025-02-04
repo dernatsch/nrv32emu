@@ -67,12 +67,18 @@ struct RV32CPU {
     medeleg: u32,
     mcause: u32,
     mtval: u32,
+    menvcfg: u32,
+    menvcfgh: u32,
+
+    mstateen: [u32; 8],
 
     scounteren: u32,
     satp: u32,
     sstatus: u32,
     stvec: u32,
     sie: u32,
+    sip: u32,
+    sscratch: u32,
     scause: u32,
     sepc: u32,
     stval: u32,
@@ -128,6 +134,8 @@ impl RV32CPU {
 
             mcounteren: 0,
 
+            mstateen: [0u32; 8],
+
             mepc: 0,
             mie: 0,
             mip: 0,
@@ -136,14 +144,19 @@ impl RV32CPU {
             mcause: 0,
             mtval: 0,
 
+            menvcfg: 0,
+            menvcfgh: 0,
+
             scounteren: 0,
             satp: 0,
             sstatus: 0,
             stvec: 0,
             sie: 0,
+            sip: 0,
             scause: 0,
             sepc: 0,
             stval: 0,
+            sscratch: 0,
 
             pmpcfg: [0u32; 4],
             pmpaddr: [0u32; 64],
@@ -153,7 +166,7 @@ impl RV32CPU {
 
             power_down: false,
 
-            timecmp: 0xffffffff,
+            timecmp: 0,
 
             load_res: 0,
         }
@@ -233,6 +246,18 @@ impl RV32CPU {
 
     fn unset_mip(&mut self, mask: u32) {
         self.mip &= !mask;
+    }
+
+    fn dump_vmem(&self, addr: u32) {
+        println!("Virtual Memory Dump");
+        println!("-------------------");
+        let mode = self.satp >> 31;
+        if self.privl == 3 || mode == 0 {
+            println!("Paging disabled.");
+        }
+
+        let pte_addr = (self.satp << 12) as usize;
+        println!("initial pte addr: {:#010x}", pte_addr);
     }
 
     fn get_phys_addr(&self, base: u32) -> Option<u32> {
@@ -347,12 +372,11 @@ impl RV32CPU {
                 return true;
             }
 
-            self.die(&format!("No fitting mem range found for {:#010x}.", addr));
-        } else {
-            self.pending_tval = addr as u32;
-            self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
-            return false;
-        }
+        } 
+
+        self.pending_tval = addr as u32;
+        self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
+        return false;
     }
 
     fn read_u32(&mut self, addr: u32) -> Option<u32> {
@@ -376,12 +400,11 @@ impl RV32CPU {
                 return Some(self.plic_read_u32(offset));
             }
 
-            panic!("No fitting mem range found for {:#010x}.", addr);
-        } else {
-            self.pending_tval = addr;
-            self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
-            None
-        }
+        } 
+
+        self.pending_tval = addr;
+        self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
+        None
     }
 
     fn write_u16(&mut self, addr: u32, val: u32) {
@@ -395,12 +418,10 @@ impl RV32CPU {
                     return;
                 }
             }
-
-            panic!("No fitting mem range found for {:#010x}.", addr);
-        } else {
-            self.pending_tval = addr;
-            self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
         }
+
+        self.pending_tval = addr;
+        self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
     }
 
     fn read_u16(&mut self, addr: u32) -> Option<u32> {
@@ -414,12 +435,11 @@ impl RV32CPU {
                 }
             }
 
-            panic!("No fitting mem range found for {:#010x}.", addr);
-        } else {
-            self.pending_tval = addr;
-            self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
-            None
-        }
+        } 
+
+        self.pending_tval = addr;
+        self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
+        None
     }
 
     fn write_u8(&mut self, addr: u32, val: u32) {
@@ -440,11 +460,10 @@ impl RV32CPU {
                 return;
             }
 
-            panic!("No fitting mem range found for {:#010x}.", addr);
-        } else {
-            self.pending_tval = addr;
-            self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
-        }
+        } 
+
+        self.pending_tval = addr;
+        self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
     }
 
     fn read_u8(&mut self, addr: u32) -> Option<u8> {
@@ -462,13 +481,11 @@ impl RV32CPU {
                 let offset = addr - UART_BASE;
                 return Some(self.uart_read_u8(offset));
             }
-
-            self.die(&format!("No fitting mem range found for {:#010x}.", addr));
-        } else {
-            self.pending_tval = addr;
-            self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
-            None
         }
+
+        self.pending_tval = addr;
+        self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
+        None
     }
 
     fn die(&self, reason: &str) -> ! {
@@ -487,6 +504,8 @@ impl RV32CPU {
             0x105 => self.stvec,
             0x106 => self.scounteren,
             0x140 => self.sscratch,
+            0x141 => self.sepc,
+            0x142 => self.scause,
             0x143 => self.stval,
             0x144 => self.sip,
             0x180 => self.satp,
@@ -497,10 +516,11 @@ impl RV32CPU {
             0x304 => self.mie,
             0x305 => self.mtvec,
             0x306 => self.mcounteren,
+            0x30a => self.menvcfg,
+            0x30c..=0x30f => self.mstateen[(csr - 0x30c) as usize],
+            0x31c..=0x31f => self.mstateen[(csr - 0x31c + 4) as usize],
+            0x31a => self.menvcfg,
             0x310 => self.mstatush,
-            0x340 => self.mscratch,
-            0x341 => self.mepc,
-            0x344 => self.mip,
             0xf14 => self.mhartid,
             0x3a0 | 0x3a1 | 0x3a2 | 0x3a3 => self.pmpcfg[(csr & 0x0f) as usize],
 
@@ -557,6 +577,12 @@ impl RV32CPU {
             0x140 => {
                 self.sscratch = val;
             }
+            0x141 => {
+                self.sepc = val;
+            }
+            0x142 => {
+                self.scause = val;
+            }
             0x143 => {
                 self.stval = val;
             }
@@ -576,14 +602,26 @@ impl RV32CPU {
                 self.mideleg = val;
             }
             0x304 => {
-                info!("mie set to {:#010x} pc={:#010x}", val, self.pc);
                 self.mie = val;
             }
             0x305 => {
                 self.mtvec = val & !3;
+                debug!("mtvec set to {:#010x} pc={:#010x}", self.mtvec, self.pc);
             }
             0x306 => {
                 self.mcounteren = val;
+            }
+            0x30a => {
+                self.menvcfg = val;
+            }
+            0x30c..=0x30f => {
+                self.mstateen[(csr - 0x30c) as usize] = val;
+            }
+            0x31c..=0x31f => {
+                self.mstateen[(csr - 0x31c + 4) as usize] = val;
+            }
+            0x31a => {
+                self.menvcfgh = val;
             }
             0x310 => {
                 self.mstatush = val;
@@ -595,6 +633,7 @@ impl RV32CPU {
                 self.mepc = val;
             }
             0x344 => {
+                debug!("mip set to {:#010x}", val);
                 self.mip = val;
             }
             0x3a0 | 0x3a1 | 0x3a2 | 0x3a3 => {
@@ -635,8 +674,6 @@ impl RV32CPU {
         let cause = self.pending_exception.unwrap();
         let tval = self.pending_tval;
 
-        debug!("EXCEPTION: cause={:#010x} tval={:#010x}", cause, tval);
-
         let deleg;
         if self.privl <= 2 {
             if cause & CAUSE_INTERRUPT > 0 {
@@ -647,6 +684,8 @@ impl RV32CPU {
         } else {
             deleg = false;
         }
+
+        debug!("EXCEPTION: cause={:#010x} tval={:#010x} deleg={}", cause, tval, deleg);
 
         if deleg {
             self.scause = cause;
