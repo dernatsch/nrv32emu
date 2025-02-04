@@ -161,11 +161,10 @@ impl RV32CPU {
 
     fn rtc_time() -> u64 {
         let ts = std::time::SystemTime::UNIX_EPOCH.elapsed().unwrap();
-        ts.as_nanos() as u64
+        (ts.as_nanos() / 100) as u64
     }
 
     fn clint_write_u32(&mut self, offset: usize, val: u32) {
-        trace!("clint write: off={:#010x} val={:#010x}", offset, val);
         match offset {
             0x4000 => {
                 self.timecmp = (self.timecmp & !0xffffffff) | val as u64;
@@ -180,10 +179,9 @@ impl RV32CPU {
     }
 
     fn clint_read_u32(&mut self, offset: usize) -> u32 {
-        trace!("clint read: off={:#010x}", offset);
         match offset {
-            0xbff8 => (Self::rtc_time() / 100) as u32,
-            0xbffc => ((Self::rtc_time() / 100) >> 32) as u32,
+            0xbff8 => Self::rtc_time() as u32,
+            0xbffc => (Self::rtc_time() >> 32) as u32,
             0x4000 => self.timecmp as u32,
             0x4004 => (self.timecmp >> 32) as u32,
             _ => unimplemented!("clint read off={:#010x}", offset),
@@ -261,6 +259,7 @@ impl RV32CPU {
 
                 if pte & 1 == 0 {
                     // invalid entry
+                    warn!("invalid pte entry");
                     return None;
                 }
 
@@ -487,6 +486,9 @@ impl RV32CPU {
             0x104 => self.sie,
             0x105 => self.stvec,
             0x106 => self.scounteren,
+            0x140 => self.sscratch,
+            0x143 => self.stval,
+            0x144 => self.sip,
             0x180 => self.satp,
             0x300 => self.mstatus,
             0x301 => self.misa,
@@ -512,12 +514,20 @@ impl RV32CPU {
             0x343 => self.mtval,
             0x344 => self.mip,
 
+            0xc01 => (Self::rtc_time() & 0xffffffff) as u32, // time
+            0xc81 => (Self::rtc_time() >> 32) as u32, // timeh
+
             0xb00..=0xb9f => 0, //XXX: performance counter
             0xda0 => 0, // supervisor count overflow
-            0xfb0 => 0, //XXX: don't know
             0xf11..=0xf13 => 0, // mvendorid, marchid, mimpid
-                                //
 
+            x => {
+                warn!("csr {:#05x} access fault", x);
+                self.pending_exception = Some(CAUSE_LOAD_ACCESS);
+                0
+            }
+
+            /*
             // forbidden csrs
             0x14d..=0x15d => {
                 self.pending_exception = Some(CAUSE_LOAD_ACCESS);
@@ -526,6 +536,7 @@ impl RV32CPU {
             },
 
             _ => 0, // unimplemented
+            */
         }
     }
 
@@ -542,6 +553,15 @@ impl RV32CPU {
             }
             0x106 => {
                 self.scounteren = val;
+            }
+            0x140 => {
+                self.sscratch = val;
+            }
+            0x143 => {
+                self.stval = val;
+            }
+            0x144 => {
+                self.sip = val;
             }
             0x180 => {
                 self.satp = val & 0x801fffff;
@@ -1011,6 +1031,8 @@ impl RV32CPU {
                             if rs2 == 0 {
                                 if rd == 0 {
                                     // c.ebreak
+                                    debug!("ebreak! pc={:#010x}", self.pc);
+                                    debug!("mtvec={:#010x} stvec={:#010x}", self.mtvec, self.stvec);
                                     self.pending_exception = Some(CAUSE_BREAKPOINT);
                                     return;
                                 } else {
@@ -1637,7 +1659,7 @@ impl std::fmt::Debug for RV32CPU {
         writeln!(f, "mstatus: {:#010x}", self.mstatus)?;
         writeln!(f, "mie: {:#010x} mip: {:#010x}", self.mie, self.mip)?;
         writeln!(f, "mtvec: {:#010x} stvec: {:#010x}", self.mtvec, self.stvec)?;
-        writeln!(f, "mtimecmp: {:#018x} ({:#018x})", self.timecmp, Self::rtc_time() / 100)?;
+        writeln!(f, "mtimecmp: {:#018x} ({:#018x})", self.timecmp, Self::rtc_time())?;
         writeln!(
             f,
             "satp: {} {:#010x}",
@@ -1765,10 +1787,9 @@ fn main() {
         const MAX_SLEEP_TIME: u64 = 10000000; // [ns] = 10 ms
 
         let mut sleeptime = 0;
-        let now = RV32CPU::rtc_time() / 100;
+        let now = RV32CPU::rtc_time();
         if machine.cpu.mip & 0x80 == 0 {
             if now > machine.cpu.timecmp {
-                debug!("INTERRUPT from timer");
                 machine.cpu.set_mip(0x80); // MIP
             } else if machine.cpu.power_down {
                 sleeptime = machine.cpu.timecmp - now;
