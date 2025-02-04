@@ -98,6 +98,7 @@ const UART_BASE: usize = 0x10000000;
 const UART_SIZE: usize = 0x00000100;
 
 const CAUSE_BREAKPOINT: u32 = 0x3;
+const CAUSE_LOAD_ACCESS: u32 = 0x5;
 const CAUSE_USER_ECALL: u32 = 0x8;
 const CAUSE_FETCH_PAGE_FAULT: u32 = 0x0c;
 const CAUSE_LOAD_PAGE_FAULT: u32 = 0xd;
@@ -480,7 +481,7 @@ impl RV32CPU {
         self.die("illegal instruction");
     }
 
-    fn read_csr(&self, csr: u32) -> u32 {
+    fn read_csr(&mut self, csr: u32) -> u32 {
         match csr {
             0x100 => self.sstatus,
             0x104 => self.sie,
@@ -515,7 +516,16 @@ impl RV32CPU {
             0xda0 => 0, // supervisor count overflow
             0xfb0 => 0, //XXX: don't know
             0xf11..=0xf13 => 0, // mvendorid, marchid, mimpid
-            _ => unimplemented!("unimplemented csr read value {csr:#x}"),
+                                //
+
+            // forbidden csrs
+            0x14d..=0x15d => {
+                self.pending_exception = Some(CAUSE_LOAD_ACCESS);
+                self.pending_tval = 0x14d;
+                0
+            },
+
+            _ => 0, // unimplemented
         }
     }
 
@@ -574,7 +584,15 @@ impl RV32CPU {
                 self.pmpaddr[(csr & 0x3f) as usize] = val;
             }
             0xb00..=0xb9f => {}
-            _ => unimplemented!("unimplemented csr write value {csr:#x}"),
+
+            // forbidden csrs
+            0x14d | 0x15d => {
+                self.pending_exception = Some(CAUSE_LOAD_ACCESS);
+                self.pending_tval = 0x14d;
+            },
+
+            _ => {},
+            // _ => self.die(&format!("unimplemented csr write value {csr:#x}")),
         }
     }
 
@@ -1232,6 +1250,11 @@ impl RV32CPU {
                                 if rd != 0 {
                                     self.regs[rd as usize] = val2;
                                 }
+
+                                if self.pending_exception.is_some() {
+                                    return;
+                                }
+
                                 self.pc += 4;
                             }
                             2 => {
@@ -1245,6 +1268,11 @@ impl RV32CPU {
                                 if rd != 0 {
                                     self.regs[rd as usize] = val2;
                                 }
+
+                                if self.pending_exception.is_some() {
+                                    return;
+                                }
+
                                 self.pc += 4;
                             }
                             3 => {
@@ -1258,6 +1286,11 @@ impl RV32CPU {
                                 if rd != 0 {
                                     self.regs[rd as usize] = val2;
                                 }
+
+                                if self.pending_exception.is_some() {
+                                    return;
+                                }
+
                                 self.pc += 4;
                             }
                             _ => {
@@ -1604,7 +1637,7 @@ impl std::fmt::Debug for RV32CPU {
         writeln!(f, "mstatus: {:#010x}", self.mstatus)?;
         writeln!(f, "mie: {:#010x} mip: {:#010x}", self.mie, self.mip)?;
         writeln!(f, "mtvec: {:#010x} stvec: {:#010x}", self.mtvec, self.stvec)?;
-        writeln!(f, "mtimecmp: {:#018x} ({:#018x})", self.timecmp, Self::rtc_time() / 100);
+        writeln!(f, "mtimecmp: {:#018x} ({:#018x})", self.timecmp, Self::rtc_time() / 100)?;
         writeln!(
             f,
             "satp: {} {:#010x}",
