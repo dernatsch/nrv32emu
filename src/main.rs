@@ -97,11 +97,11 @@ const PLIC_SIZE: usize = 0x04000000;
 const UART_BASE: usize = 0x10000000;
 const UART_SIZE: usize = 0x00000100;
 
-const CAUSE_FETCH_PAGE_FAULT: u32 = 0x0c;
-const CAUSE_LOAD_PAGE_FAULT: u32 = 0x0d;
-const CAUSE_INTERRUPT: u32 = 0x80;
-const CAUSE_BREAKPOINT: u32 = 0x03;
+const CAUSE_BREAKPOINT: u32 = 0x3;
 const CAUSE_USER_ECALL: u32 = 0x8;
+const CAUSE_FETCH_PAGE_FAULT: u32 = 0x0c;
+const CAUSE_LOAD_PAGE_FAULT: u32 = 0xd;
+const CAUSE_INTERRUPT: u32 = 0x80;
 
 impl RV32CPU {
     fn new() -> Self {
@@ -251,7 +251,7 @@ impl RV32CPU {
         } else {
             let mut level = LEVELS - 1;
             let mut pte_addr = (self.satp << 12) as usize;
-            while level > 0 {
+            while level >= 0 {
                 let vaddr_shift = 12 + level * 10;
                 let vpn = (base as usize >> vaddr_shift) & 0x3ff;
                 pte_addr += vpn * 4;
@@ -349,7 +349,9 @@ impl RV32CPU {
 
             self.die(&format!("No fitting mem range found for {:#010x}.", addr));
         } else {
-            todo!("mmu exception");
+            self.pending_tval = addr as u32;
+            self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
+            return false;
         }
     }
 
@@ -396,7 +398,8 @@ impl RV32CPU {
 
             panic!("No fitting mem range found for {:#010x}.", addr);
         } else {
-            todo!("mmu exception");
+            self.pending_tval = addr;
+            self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
         }
     }
 
@@ -413,7 +416,9 @@ impl RV32CPU {
 
             panic!("No fitting mem range found for {:#010x}.", addr);
         } else {
-            todo!("mmu exception");
+            self.pending_tval = addr;
+            self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
+            None
         }
     }
 
@@ -437,7 +442,8 @@ impl RV32CPU {
 
             panic!("No fitting mem range found for {:#010x}.", addr);
         } else {
-            todo!("mmu exception");
+            self.pending_tval = addr;
+            self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
         }
     }
 
@@ -457,9 +463,11 @@ impl RV32CPU {
                 return Some(self.uart_read_u8(offset));
             }
 
-            panic!("No fitting mem range found for {:#010x}.", addr);
+            self.die(&format!("No fitting mem range found for {:#010x}.", addr));
         } else {
-            todo!("mmu exception");
+            self.pending_tval = addr;
+            self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
+            None
         }
     }
 
@@ -1596,7 +1604,7 @@ impl std::fmt::Debug for RV32CPU {
         writeln!(f, "mstatus: {:#010x}", self.mstatus)?;
         writeln!(f, "mie: {:#010x} mip: {:#010x}", self.mie, self.mip)?;
         writeln!(f, "mtvec: {:#010x} stvec: {:#010x}", self.mtvec, self.stvec)?;
-        writeln!(f, "mtimecmp: {:#010x} ({:#010x})", self.timecmp, Self::rtc_time() / 100);
+        writeln!(f, "mtimecmp: {:#018x} ({:#018x})", self.timecmp, Self::rtc_time() / 100);
         writeln!(
             f,
             "satp: {} {:#010x}",
