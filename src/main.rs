@@ -513,8 +513,6 @@ impl RV32CPU {
             0x3a0 | 0x3a1 | 0x3a2 | 0x3a3 => self.pmpcfg[(csr & 0x0f) as usize],
 
             0x3b0..=0x3ff => self.pmpaddr[(csr & 0x3f) as usize],
-            0xc01 => 0,
-            0x320..=0x33f => 0, //XXX: counter setup
 
             0x340 => self.mscratch,
             0x341 => self.mepc,
@@ -525,8 +523,6 @@ impl RV32CPU {
             0xc01 => (Self::rtc_time() & 0xffffffff) as u32, // time
             0xc81 => (Self::rtc_time() >> 32) as u32, // timeh
 
-            0xb00..=0xb9f => 0, //XXX: performance counter
-            0xda0 => 0, // supervisor count overflow
             0xf11..=0xf13 => 0, // mvendorid, marchid, mimpid
 
             x => {
