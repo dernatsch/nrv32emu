@@ -76,8 +76,6 @@ struct RV32CPU {
     satp: u32,
     sstatus: u32,
     stvec: u32,
-    sie: u32,
-    sip: u32,
     sscratch: u32,
     scause: u32,
     sepc: u32,
@@ -108,7 +106,7 @@ const CAUSE_LOAD_ACCESS: u32 = 0x5;
 const CAUSE_USER_ECALL: u32 = 0x8;
 const CAUSE_FETCH_PAGE_FAULT: u32 = 0x0c;
 const CAUSE_LOAD_PAGE_FAULT: u32 = 0xd;
-const CAUSE_INTERRUPT: u32 = 0x80;
+const CAUSE_INTERRUPT: u32 = 0x80000000;
 
 impl RV32CPU {
     fn new() -> Self {
@@ -151,8 +149,6 @@ impl RV32CPU {
             satp: 0,
             sstatus: 0,
             stvec: 0,
-            sie: 0,
-            sip: 0,
             scause: 0,
             sepc: 0,
             stval: 0,
@@ -166,7 +162,7 @@ impl RV32CPU {
 
             power_down: false,
 
-            timecmp: 0,
+            timecmp: 0xffffffffffffffff,
 
             load_res: 0,
         }
@@ -202,6 +198,7 @@ impl RV32CPU {
     }
 
     fn plic_write_u32(&mut self, offset: usize, _val: u32) {
+        debug!("PLIC write off={:#010x} val={:#010x}", offset, _val);
         match offset {
             _ => {},
             // _ => unimplemented!("PLIC write offset {:#010x}", offset),
@@ -209,6 +206,7 @@ impl RV32CPU {
     }
 
     fn plic_read_u32(&mut self, offset: usize) -> u32 {
+        debug!("PLIC read off={:#010x}", offset);
         match offset {
             _ => 0,
             // _ => unimplemented!("PLIC read offset {:#010x}", offset),
@@ -395,7 +393,7 @@ impl RV32CPU {
         None
     }
 
-    fn write_u16(&mut self, addr: u32, val: u32) {
+    fn write_u16(&mut self, addr: u32, val: u32) -> bool {
         if let Some(addr) = self.get_phys_addr(addr) {
             let addr = addr as usize;
             for mem in &mut self.mem.ranges {
@@ -403,13 +401,14 @@ impl RV32CPU {
                     let offset = addr - mem.base;
 
                     (&mut mem.mem[offset..]).put_u16_le(val as u16);
-                    return;
+                    return true;
                 }
             }
         }
 
         self.pending_tval = addr;
         self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
+        false
     }
 
     fn read_u16(&mut self, addr: u32) -> Option<u32> {
@@ -430,7 +429,7 @@ impl RV32CPU {
         None
     }
 
-    fn write_u8(&mut self, addr: u32, val: u32) {
+    fn write_u8(&mut self, addr: u32, val: u32) -> bool {
         if let Some(addr) = self.get_phys_addr(addr) {
             let addr = addr as usize;
             for mem in &mut self.mem.ranges {
@@ -438,20 +437,21 @@ impl RV32CPU {
                     let offset = addr - mem.base;
 
                     mem.mem[offset] = val as u8;
-                    return;
+                    return true;
                 }
             }
 
             if (UART_BASE..=(UART_BASE + UART_SIZE - 1)).contains(&addr) {
                 let offset = addr - UART_BASE;
                 self.uart_write_u8(offset, val);
-                return;
+                return true;
             }
 
         } 
 
         self.pending_tval = addr;
         self.pending_exception = Some(CAUSE_LOAD_PAGE_FAULT);
+        false
     }
 
     fn read_u8(&mut self, addr: u32) -> Option<u8> {
@@ -488,14 +488,18 @@ impl RV32CPU {
     fn read_csr(&mut self, csr: u32) -> u32 {
         match csr {
             0x100 => self.sstatus,
-            0x104 => self.sie,
+            0x104 => {
+                self.mie & self.mideleg // sie
+            }
             0x105 => self.stvec,
             0x106 => self.scounteren,
             0x140 => self.sscratch,
             0x141 => self.sepc,
             0x142 => self.scause,
             0x143 => self.stval,
-            0x144 => self.sip,
+            0x144 => {
+                self.mip & self.mideleg // sip
+            }
             0x180 => self.satp,
             0x300 => self.mstatus,
             0x301 => self.misa,
@@ -550,7 +554,8 @@ impl RV32CPU {
                 self.sstatus = val;
             }
             0x104 => {
-                self.sie = val;
+                let mask = self.mideleg;
+                self.mie = (val & mask) | (self.mie & !mask);
             }
             0x105 => {
                 self.stvec = val;
@@ -562,7 +567,7 @@ impl RV32CPU {
                 self.sscratch = val;
             }
             0x141 => {
-                self.sepc = val;
+                self.sepc = val & !1;
             }
             0x142 => {
                 self.scause = val;
@@ -571,7 +576,8 @@ impl RV32CPU {
                 self.stval = val;
             }
             0x144 => {
-                self.sip = val;
+                let mask = self.mideleg;
+                self.mip = (val & mask) | (self.mip & !mask);
             }
             0x180 => {
                 self.satp = val & 0x801fffff;
@@ -590,7 +596,6 @@ impl RV32CPU {
             }
             0x305 => {
                 self.mtvec = val & !3;
-                debug!("mtvec set to {:#010x} pc={:#010x}", self.mtvec, self.pc);
             }
             0x306 => {
                 self.mcounteren = val;
@@ -617,7 +622,6 @@ impl RV32CPU {
                 self.mepc = val;
             }
             0x344 => {
-                debug!("mip set to {:#010x}", val);
                 self.mip = val;
             }
             0x3a0 | 0x3a1 | 0x3a2 | 0x3a3 => {
@@ -652,6 +656,22 @@ impl RV32CPU {
         self.mstatus &= !(3 << 11);
         self.privl = mpp;
         self.pc = self.mepc;
+    }
+
+    fn do_sret(&mut self) {
+        debug!("sret sepc={:#010x}", self.sepc);
+        let spp = (self.mstatus >> 8) & 1;
+        let spie = (self.mstatus >> 5) & 1;
+
+        self.mstatus &= !(1 << spp);
+        self.mstatus |= spie << spp;
+
+        // set SPIE
+        self.mstatus |= 1 << 5;
+
+        self.mstatus &= !(1 << 8);
+        self.privl = spp;
+        self.pc = self.sepc;
     }
 
     fn raise_exception(&mut self) {
@@ -748,7 +768,7 @@ impl RV32CPU {
         if mask != 0 {
             let irq_no = mask.trailing_zeros();
             debug!("INTERRUPT {} raised", irq_no);
-            self.pending_exception = Some(irq_no | 0x80000000);
+            self.pending_exception = Some(irq_no | CAUSE_INTERRUPT);
             true
         } else {
             false
@@ -819,8 +839,6 @@ impl RV32CPU {
                         if let Some(val) = self.read_u32(addr) {
                             self.regs[rd as usize] = val;
                             self.pc += 2;
-                        } else {
-                            
                         }
                     }
                     6 => {
@@ -830,8 +848,9 @@ impl RV32CPU {
                         let rs1 = (insn >> 7) & 7 | 8;
                         let addr = self.regs[rs1 as usize].wrapping_add(imm);
                         let val = self.regs[rd as usize];
-                        self.write_u32(addr, val);
-                        self.pc += 2;
+                        if self.write_u32(addr, val) {
+                            self.pc += 2;
+                        }
                     }
                     _ => unimplemented!("compact0 function {}", funct3),
                 }
@@ -1078,9 +1097,9 @@ impl RV32CPU {
                         // c.swsp
                         let imm = ((insn >> 7) & 0x3c) | ((insn >> 1) & 0xc0);
                         let addr = self.regs[2] + imm;
-                        self.write_u32(addr, self.regs[rs2 as usize]);
-
-                        self.pc += 2;
+                        if self.write_u32(addr, self.regs[rs2 as usize]) {
+                            self.pc += 2;
+                        }
                     }
                     _ => unimplemented!("compact2 function {}", funct3),
                 }
@@ -1154,23 +1173,25 @@ impl RV32CPU {
                         let imm = sext!(imm as i32, 11);
                         let addr = self.regs[rs1 as usize].wrapping_add(imm as u32);
 
-                        match funct3 {
+                        let retired = match funct3 {
                             0 => {
                                 // sb
-                                self.write_u8(addr, self.regs[rs2 as usize]);
+                                self.write_u8(addr, self.regs[rs2 as usize])
                             }
                             1 => {
                                 // sh
-                                self.write_u16(addr, self.regs[rs2 as usize]);
+                                self.write_u16(addr, self.regs[rs2 as usize])
                             }
                             2 => {
                                 // sw
-                                self.write_u32(addr, self.regs[rs2 as usize]);
+                                self.write_u32(addr, self.regs[rs2 as usize])
                             }
                             _ => unimplemented!("store {}", funct3),
-                        }
+                        };
 
-                        self.pc += 4;
+                        if retired {
+                            self.pc += 4;
+                        }
                     }
                     0x17 => {
                         // auipc
@@ -1266,6 +1287,10 @@ impl RV32CPU {
                                         debug!("ebreak! pc={:#010x}", self.pc);
                                         self.pending_exception = Some(CAUSE_BREAKPOINT);
                                         return;
+                                    }
+                                    0x102 => {
+                                        // sret
+                                        self.do_sret();
                                     }
                                     0x302 => {
                                         // mret
@@ -1536,7 +1561,9 @@ impl RV32CPU {
                                         if let Some(val) = self.read_u32(addr) {
                                             let val2 = self.regs[rs2 as usize];
                                             let res = val.wrapping_add(val2);
-                                            self.write_u32(addr, res);
+                                            if !self.write_u32(addr, res) {
+                                                return;
+                                            }
                                             if rd != 0 {
                                                 self.regs[rd as usize] = val;
                                             }
@@ -1548,7 +1575,9 @@ impl RV32CPU {
                                         // amoswap.w
                                         if let Some(val) = self.read_u32(addr) {
                                             let val2 = self.regs[rs2 as usize];
-                                            self.write_u32(addr, val2);
+                                            if !self.write_u32(addr, val2) {
+                                                return;
+                                            }
                                             if rd != 0 {
                                                 self.regs[rd as usize] = val;
                                             }
@@ -1591,7 +1620,10 @@ impl RV32CPU {
                                         if let Some(val) = self.read_u32(addr) {
                                             let val2 = self.regs[rs2 as usize];
                                             let res = val | val2;
-                                            self.write_u32(addr, res);
+                                            if !self.write_u32(addr, res) {
+                                                return;
+                                            }
+
                                             if rd != 0 {
                                                 self.regs[rd as usize] = val;
                                             }
@@ -1604,7 +1636,10 @@ impl RV32CPU {
                                         if let Some(val) = self.read_u32(addr) {
                                             let val2 = self.regs[rs2 as usize];
                                             let res = val & val2;
-                                            self.write_u32(addr, res);
+                                            if !self.write_u32(addr, res) {
+                                                return;
+                                            }
+
                                             if rd != 0 {
                                                 self.regs[rd as usize] = val;
                                             }
@@ -1680,7 +1715,7 @@ impl std::fmt::Debug for RV32CPU {
         }
         writeln!(f, "privl: {}", PRIVL_NAMES[self.privl as usize])?;
         writeln!(f, "mstatus: {:#010x}", self.mstatus)?;
-        writeln!(f, "mie: {:#010x} mip: {:#010x}", self.mie, self.mip)?;
+        writeln!(f, "mie: {:#010x} mip: {:#010x} mideleg: {:#010x}", self.mie, self.mip, self.mideleg)?;
         writeln!(f, "mtvec: {:#010x} stvec: {:#010x}", self.mtvec, self.stvec)?;
         writeln!(f, "mtimecmp: {:#018x} ({:#018x})", self.timecmp, Self::rtc_time())?;
         writeln!(
@@ -1822,7 +1857,7 @@ fn main() {
             }
         }
 
-        if false && sleeptime > 0 {
+        if sleeptime > 0 {
             std::thread::sleep(std::time::Duration::from_nanos(sleeptime));
         }
     }
