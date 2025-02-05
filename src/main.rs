@@ -74,7 +74,6 @@ struct RV32CPU {
 
     scounteren: u32,
     satp: u32,
-    sstatus: u32,
     stvec: u32,
     sscratch: u32,
     scause: u32,
@@ -107,6 +106,8 @@ const CAUSE_USER_ECALL: u32 = 0x8;
 const CAUSE_FETCH_PAGE_FAULT: u32 = 0x0c;
 const CAUSE_LOAD_PAGE_FAULT: u32 = 0xd;
 const CAUSE_INTERRUPT: u32 = 0x80000000;
+
+const SSTATUS_MASK: u32 = 0x0000de122;
 
 impl RV32CPU {
     fn new() -> Self {
@@ -147,7 +148,6 @@ impl RV32CPU {
 
             scounteren: 0,
             satp: 0,
-            sstatus: 0,
             stvec: 0,
             scause: 0,
             sepc: 0,
@@ -487,7 +487,8 @@ impl RV32CPU {
 
     fn read_csr(&mut self, csr: u32) -> u32 {
         match csr {
-            0x100 => self.sstatus,
+            0x100 => self.mstatus & SSTATUS_MASK, //TODO: this will need to change with the F/D
+                                                   //extension because of the SD bit
             0x104 => {
                 self.mie & self.mideleg // sie
             }
@@ -551,7 +552,8 @@ impl RV32CPU {
     fn write_csr(&mut self, csr: u32, val: u32) {
         match csr {
             0x100 => {
-                self.sstatus = val;
+                self.mstatus &= !SSTATUS_MASK;
+                self.mstatus |= val & SSTATUS_MASK;
             }
             0x104 => {
                 let mask = self.mideleg;
@@ -659,7 +661,6 @@ impl RV32CPU {
     }
 
     fn do_sret(&mut self) {
-        debug!("sret sepc={:#010x}", self.sepc);
         let spp = (self.mstatus >> 8) & 1;
         let spie = (self.mstatus >> 5) & 1;
 
@@ -691,6 +692,7 @@ impl RV32CPU {
 
         debug!("EXCEPTION: cause={:#010x} tval={:#010x} deleg={}", cause, tval, deleg);
 
+        let pie = (self.mstatus >> self.privl) & 1;
         if deleg {
             self.scause = cause;
             self.sepc = self.pc;
@@ -698,11 +700,11 @@ impl RV32CPU {
 
             // set spie
             self.mstatus &= !(1 << 5);
-            self.mstatus |= (self.privl & 1) << 5;
+            self.mstatus |= pie << 5;
 
             // set spp
             self.mstatus &= !(1 << 8);
-            self.mstatus |= self.privl << 8;
+            self.mstatus |= (self.privl & 1) << 8;
 
             // unset sie
             self.mstatus &= !(1 << 1);
@@ -716,7 +718,7 @@ impl RV32CPU {
 
             // set mpie
             self.mstatus &= !(1 << 7);
-            self.mstatus |= (self.privl & 1) << 7;
+            self.mstatus |= pie << 7;
 
             // set mpp
             self.mstatus &= !(3 << 11);
@@ -767,7 +769,7 @@ impl RV32CPU {
         let mask = self.get_pending_irq_mask();
         if mask != 0 {
             let irq_no = mask.trailing_zeros();
-            debug!("INTERRUPT {} raised", irq_no);
+            debug!("INTERRUPT {} raised mstatus={:#010x}", irq_no, self.mstatus);
             self.pending_exception = Some(irq_no | CAUSE_INTERRUPT);
             true
         } else {
@@ -1074,7 +1076,6 @@ impl RV32CPU {
                                 if rd == 0 {
                                     // c.ebreak
                                     debug!("ebreak! pc={:#010x}", self.pc);
-                                    debug!("mtvec={:#010x} stvec={:#010x}", self.mtvec, self.stvec);
                                     self.pending_exception = Some(CAUSE_BREAKPOINT);
                                     return;
                                 } else {
@@ -1449,6 +1450,10 @@ impl RV32CPU {
                                     // mulh
                                     val = ((val as i64 * val2 as i64) >> 32) as u32;
                                 }
+                                2 => {
+                                    // mulhsu
+                                    val = ((val as i64 * (val2 as u64 as i64)) >> 32) as u32;
+                                }
                                 3 => {
                                     // mulhu
                                     val = ((val as u64 * val2 as u64) >> 32) as u32;
@@ -1763,7 +1768,7 @@ impl VMMemory {
 
     /// Returns the size of the loaded data.
     fn load_from_file(&mut self, base: usize, path: &str) -> usize {
-        println!("loading file: {} at {:#x}", path, base);
+        debug!("loading file: {} at {:#x}", path, base);
         let data = std::fs::read(path).unwrap();
         self.load_from_slice(base, &data)
     }
@@ -1848,7 +1853,7 @@ fn main() {
         let now = RV32CPU::rtc_time();
         if machine.cpu.mip & 0x80 == 0 {
             if now > machine.cpu.timecmp {
-                machine.cpu.set_mip(0x80); // MIP
+                machine.cpu.set_mip(0xa0); // MIP
             } else if machine.cpu.power_down {
                 sleeptime = machine.cpu.timecmp - now;
                 sleeptime = sleeptime.max(MAX_SLEEP_TIME);
