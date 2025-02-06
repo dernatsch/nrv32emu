@@ -1869,7 +1869,7 @@ fn main() {
         let now = RV32CPU::rtc_time();
         if machine.cpu.mip & 0x80 == 0 {
             if now > machine.cpu.timecmp {
-                machine.cpu.set_mip(0xa0); // MIP
+                machine.cpu.set_mip(0x80); // MIP
             } else if machine.cpu.power_down {
                 sleeptime = machine.cpu.timecmp - now;
                 sleeptime = sleeptime.max(MAX_SLEEP_TIME);
