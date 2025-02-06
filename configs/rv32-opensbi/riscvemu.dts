@@ -66,9 +66,11 @@
 	};
 
 	chosen {
-		stdout-path = "/soc/serial";
-		bootargs = "earlycon keep_bootcon";
+		stdout-path = "/soc/serial@10000000";
+		bootargs = "root=/dev/ram0 earlycon";
 		riscv,kernel-start = <0x00 0x80400000>;
 		riscv,kernel-end = <0x00 0x8071a37c>;
+		linux,initrd-start = <0x84000000>;
+		linux,initrd-end = <0x8433ca00>;
 	};
 };

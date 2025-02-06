@@ -1297,7 +1297,7 @@ impl RV32CPU {
                                         // mret
                                         self.do_mret();
                                     }
-                                    0x120 => {
+                                    _ => {
                                         self.pc += 4;
                                     }
                                     0x105 => {
@@ -1620,6 +1620,22 @@ impl RV32CPU {
                                             }
                                         }
                                     }
+                                    4 => {
+                                        // amoxor.w
+                                        if let Some(val) = self.read_u32(addr) {
+                                            let val2 = self.regs[rs2 as usize];
+                                            let res = val ^ val2;
+                                            if !self.write_u32(addr, res) {
+                                                return;
+                                            }
+
+                                            if rd != 0 {
+                                                self.regs[rd as usize] = val;
+                                            }
+                                        } else {
+                                            return;
+                                        }
+                                    }
                                     8 => {
                                         // amoor.w
                                         if let Some(val) = self.read_u32(addr) {
@@ -1829,7 +1845,7 @@ fn main() {
         bios_path: String::from("./configs/rv32-opensbi/fw_jump.bin"),
         kernel_path: String::from("./configs/rv32-opensbi/Image"),
         dtb_path: String::from("./configs/rv32-opensbi/riscvemu.dtb"),
-        drive: String::from("/dev/null"),
+        drive: String::from("./configs/rv32-opensbi/rootfs.cpio"),
     };
 
     let mut machine = VMMachine::from_config(&cfg);
@@ -1862,7 +1878,7 @@ fn main() {
             }
         }
 
-        if sleeptime > 0 {
+        if false && sleeptime > 0 {
             std::thread::sleep(std::time::Duration::from_nanos(sleeptime));
         }
     }
