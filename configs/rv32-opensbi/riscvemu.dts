@@ -67,7 +67,7 @@
 
 	chosen {
 		stdout-path = "/soc/serial@10000000";
-		bootargs = "root=/dev/ram0 earlycon";
+		bootargs = "root=/dev/ram0";
 		riscv,kernel-start = <0x00 0x80400000>;
 		riscv,kernel-end = <0x00 0x8071a37c>;
 		linux,initrd-start = <0x84000000>;
